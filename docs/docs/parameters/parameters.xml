@@ -607,6 +607,56 @@
     <required>False</required>
   </parameter>
   <parameter tool="w90">
+    <name>sp_en_trust_radius</name>
+    <type>R</type>
+    <description>Maximum Frobenius norm of the anti-Hermitian update at any k-point</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>0.2</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_armijo_c1</name>
+    <type>R</type>
+    <description>Sufficient-decrease constant for space-energy Armijo backtracking</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1.0e-4</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_backtrack_factor</name>
+    <type>R</type>
+    <description>Step reduction factor for space-energy Armijo backtracking</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>0.5</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_max_backtracks</name>
+    <type>I</type>
+    <description>Maximum rejected Armijo trials in one space-energy localization iteration</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>24</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_min_step</name>
+    <type>R</type>
+    <description>Minimum step accepted by space-energy Armijo backtracking</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1.0e-14</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
     <name>write_info</name>
     <type>L</type>
     <description>Write final per-Wannier-function space-energy diagnostics to seedname.info</description>

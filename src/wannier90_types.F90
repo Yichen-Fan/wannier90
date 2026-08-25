@@ -193,6 +193,16 @@ module w90_wannier90_types
     !! Energy-variance scale C in Angstrom^2/eV^2.
     real(kind=dp) :: power = 1.0_dp
     !! Power p of the per-Wannier-function p-norm; p >= 1.
+    real(kind=dp) :: trust_radius = 0.2_dp
+    !! Maximum Frobenius norm of the anti-Hermitian update at any k-point.
+    real(kind=dp) :: armijo_constant = 1.0e-4_dp
+    !! Sufficient-decrease constant for Armijo backtracking.
+    real(kind=dp) :: backtrack_factor = 0.5_dp
+    !! Step reduction factor after a rejected trial.
+    real(kind=dp) :: minimum_step = 1.0e-14_dp
+    !! Smallest step allowed during Armijo backtracking.
+    integer :: max_backtracks = 24
+    !! Maximum number of rejected Armijo trials per iteration.
     logical :: write_info = .false.
     !! Write final per-WF space, energy, and optional occupation data to seedname.info.
     integer :: num_occ = 0

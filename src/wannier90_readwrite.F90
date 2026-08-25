@@ -768,6 +768,48 @@ contains
       return
     end if
 
+    call w90_readwrite_get_keyword(settings, 'sp_en_trust_radius', found, error, comm, &
+                                   r_value=wann_control%space_energy%trust_radius)
+    if (allocated(error)) return
+    if (wann_control%space_energy%trust_radius < 0.0_dp) then
+      call set_error_input(error, 'Error: sp_en_trust_radius must be non-negative', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_armijo_c1', found, error, comm, &
+                                   r_value=wann_control%space_energy%armijo_constant)
+    if (allocated(error)) return
+    if (wann_control%space_energy%armijo_constant <= 0.0_dp .or. &
+        wann_control%space_energy%armijo_constant >= 1.0_dp) then
+      call set_error_input(error, 'Error: sp_en_armijo_c1 must lie strictly between zero and one', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_backtrack_factor', found, error, comm, &
+                                   r_value=wann_control%space_energy%backtrack_factor)
+    if (allocated(error)) return
+    if (wann_control%space_energy%backtrack_factor <= 0.0_dp .or. &
+        wann_control%space_energy%backtrack_factor >= 1.0_dp) then
+      call set_error_input(error, 'Error: sp_en_backtrack_factor must lie strictly between zero and one', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_min_step', found, error, comm, &
+                                   r_value=wann_control%space_energy%minimum_step)
+    if (allocated(error)) return
+    if (wann_control%space_energy%minimum_step <= 0.0_dp) then
+      call set_error_input(error, 'Error: sp_en_min_step must be positive', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_max_backtracks', found, error, comm, &
+                                   i_value=wann_control%space_energy%max_backtracks)
+    if (allocated(error)) return
+    if (wann_control%space_energy%max_backtracks < 0) then
+      call set_error_input(error, 'Error: sp_en_max_backtracks must be non-negative', comm)
+      return
+    end if
+
     call w90_readwrite_get_keyword(settings, 'write_info', found, error, comm, &
                                    l_value=wann_control%space_energy%write_info)
     if (allocated(error)) return
@@ -2124,6 +2166,16 @@ contains
           wann_control%space_energy%scale, '|'
         write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Space-energy p-norm power                 :', &
           wann_control%space_energy%power, '|'
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Space-energy trust radius                 :', &
+          wann_control%space_energy%trust_radius, '|'
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Armijo sufficient-decrease constant       :', &
+          wann_control%space_energy%armijo_constant, '|'
+        write (stdout, '(1x,a46,10x,F8.3,13x,a1)') '|  Armijo backtrack factor                   :', &
+          wann_control%space_energy%backtrack_factor, '|'
+        write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  Maximum Armijo backtracks                 :', &
+          wann_control%space_energy%max_backtracks, '|'
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Minimum Armijo step                       :', &
+          wann_control%space_energy%minimum_step, '|'
         write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Write space-energy information file      :', &
           wann_control%space_energy%write_info, '|'
         if (wann_control%space_energy%write_info) then

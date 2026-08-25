@@ -852,6 +852,48 @@ one produce orbital-dependent marginal spatial and energy weights.
 
 The default value is 1.0.
 
+### `real(kind=dp) :: sp_en_trust_radius`
+
+Limit one space-energy localization update so that the Frobenius norm
+of its anti-Hermitian tangent generator is no larger than this value at
+any k-point. The proposed `fixed_step` or parabolic-line-search step is
+reduced when necessary. This is the periodic analogue of the complete-
+block trust radius used by the molecular localizer. Set it to zero to
+disable the cap.
+
+The default value is 0.2.
+
+### `real(kind=dp) :: sp_en_armijo_c1`
+
+Set the sufficient-decrease constant $c_1$ in the Armijo condition
+
+$$
+F(U_{\alpha})\leq F(U_0)+c_1\alpha F'(0).
+$$
+
+Every space-energy localization step must satisfy this condition, so
+the accepted objective is monotonically non-increasing. The default
+value is $10^{-4}$.
+
+### `real(kind=dp) :: sp_en_backtrack_factor`
+
+Set the factor used to reduce a rejected Armijo step. The value must lie
+strictly between zero and one. The default value is 0.5.
+
+### `integer :: sp_en_max_backtracks`
+
+Set the maximum number of Armijo step reductions in one iteration. If
+no acceptable step is found, W90 restores and returns the last accepted
+localization state. An accepted step that required backtracking also
+forces the conjugate-gradient direction to restart on the next cycle.
+
+The default value is 24.
+
+### `real(kind=dp) :: sp_en_min_step`
+
+Set the smallest step that Armijo backtracking may try. The default
+value is $10^{-14}$.
+
 ### `logical :: write_info`
 
 Write the final per-Wannier-function localization data to
@@ -883,6 +925,11 @@ conversion can be requested with
 sp_en_mix = 0.5
 sp_en_scale = 0.3781820678533007
 sp_en_power = 2.0
+sp_en_trust_radius = 0.2
+sp_en_armijo_c1 = 1.0e-4
+sp_en_backtrack_factor = 0.5
+sp_en_max_backtracks = 24
+sp_en_min_step = 1.0e-14
 write_info = true
 num_occ = 4
 ```

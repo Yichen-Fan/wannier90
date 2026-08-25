@@ -179,17 +179,17 @@ contains
 
     integer, allocatable :: global_k(:)
     complex(kind=dp) :: rdotk
-    integer :: conv_count, noise_count, page_unit
+    integer :: armijo_backtracks, conv_count, noise_count, page_unit
     integer :: i, n, iter, ind, ierr, iw, ncg, nkp, nkp_loc
     integer :: irguide
     integer :: irpt, loop_kpt
     integer :: nkrank
-    logical :: lconverged, lrandom, lfirst
+    logical :: larmijo_stalled, lconverged, lrandom, lfirst, ltrust_capped
     logical :: lprint, ldump, lquad
     real(kind=dp) :: doda0
     real(kind=dp) :: falphamin, alphamin
     real(kind=dp) :: gcfac, gcnorm1, gcnorm0
-    real(kind=dp) :: save_spread
+    real(kind=dp) :: armijo_bound, direction_norm, maximum_step, save_spread, trial_step_used
 
     ! pllel setup
     logical :: on_root = .false.
@@ -590,9 +590,12 @@ contains
     conv_count = 0
     noise_count = 0
 
-    if (.not. wann_control%lfixstep .and. optimisation <= 0) then
+    if ((.not. wann_control%lfixstep .or. wann_control%space_energy%enabled) .and. &
+        optimisation <= 0) then
       open (newunit=page_unit, status='scratch', form='unformatted')
     end if
+
+    larmijo_stalled = .false.
 
     ! main iteration loop
     do iter = 1, wann_control%num_iter
@@ -670,26 +673,46 @@ contains
       ! save search direction
       cdqkeep_loc(:, :, :) = cdq_loc(:, :, :)
 
-      ! check whether we're doing fixed step lengths
-      if (wann_control%lfixstep) then
+      maximum_step = huge(1.0_dp)
+      direction_norm = 0.0_dp
+      ltrust_capped = .false.
+      if (wann_control%space_energy%enabled) then
+        call internal_space_energy_maximum_step(cdqkeep_loc, kmesh_info%wbtot, &
+                                                wann_control%space_energy%trust_radius, &
+                                                direction_norm, maximum_step, error, comm)
+        if (allocated(error)) return
+      end if
 
-        alphamin = wann_control%fixed_step
-
-        ! or a parabolic line search
-      else
-
-        ! take trial step
-        cdq_loc(:, :, :) = cdqkeep_loc(:, :, :)*(wann_control%trial_step/(4.0_dp*kmesh_info%wbtot))
-
-        ! store original U and M before rotating
+      ! Armijo backtracking needs a snapshot even when fixed_step is used.
+      if (.not. wann_control%lfixstep .or. wann_control%space_energy%enabled) then
         u0_loc = u_matrix_loc
-
         if (optimisation <= 0) then
           write (page_unit) m_matrix_loc
           rewind (page_unit)
         else
           m0_loc = m_matrix_loc
         end if
+      end if
+
+      ! check whether we're doing fixed step lengths
+      if (wann_control%lfixstep) then
+
+        alphamin = wann_control%fixed_step
+        if (wann_control%space_energy%enabled .and. alphamin > maximum_step) then
+          alphamin = maximum_step
+          ltrust_capped = .true.
+        end if
+
+        ! or a parabolic line search
+      else
+
+        ! take trial step
+        trial_step_used = wann_control%trial_step
+        if (wann_control%space_energy%enabled .and. trial_step_used > maximum_step) then
+          trial_step_used = maximum_step
+          ltrust_capped = .true.
+        end if
+        cdq_loc(:, :, :) = cdqkeep_loc(:, :, :)*(trial_step_used/(4.0_dp*kmesh_info%wbtot))
 
         ! update U and M
         call internal_new_u_and_m(cdq, cmtmp, tmp_cdq, cwork, rwork, evals, cwschur1, cwschur2, &
@@ -715,7 +738,12 @@ contains
 
         ! Calculate optimal step (alphamin)
         call internal_optimal_step(wann_spread, trial_spread, doda0, alphamin, falphamin, lquad, &
-                                   lprint, wann_control%trial_step, stdout, timer)
+                                   lprint, trial_step_used, stdout, timer)
+        if (wann_control%space_energy%enabled .and. alphamin > maximum_step) then
+          alphamin = maximum_step
+          lquad = .true.
+          ltrust_capped = .true.
+        end if
       end if
 
       ! print line search information
@@ -730,14 +758,19 @@ contains
         write (stdout, *) ' LINE --> ||SD gradient||^2             :', &
           gcnorm1*print_output%lenconfac**2
         if (.not. wann_control%lfixstep) then
-          write (stdout, *) ' LINE --> Trial step length             :', wann_control%trial_step
-          if (lquad) then
+          write (stdout, *) ' LINE --> Trial step length             :', trial_step_used
+          if (lquad .and. .not. ltrust_capped) then
             write (stdout, *) ' LINE --> Optimal parabolic step length :', alphamin
             write (stdout, *) ' LINE --> Functional at predicted min.  :', &
               falphamin*print_output%lenconfac**2
           end if
         else
           write (stdout, *) ' LINE --> Fixed step length             :', wann_control%fixed_step
+        end if
+        if (wann_control%space_energy%enabled .and. wann_control%space_energy%trust_radius > 0.0_dp) then
+          write (stdout, *) ' LINE --> Tangent direction norm        :', direction_norm
+          write (stdout, *) ' LINE --> Trust-radius maximum step     :', maximum_step
+          if (ltrust_capped) write (stdout, *) ' LINE --> Step limited by trust radius'
         end if
         write (stdout, *) ' LINE --> CG coefficient                :', gcfac
       end if
@@ -789,6 +822,52 @@ contains
         call wann_spread_copy(wann_spread, old_spread)
         call wann_spread_copy(trial_spread, wann_spread)
 
+      end if
+
+      ! The molecular localizer accepts only Armijo-decreasing steps.  Apply
+      ! the same safeguard here and restart conjugacy after any backtracking.
+      if (wann_control%space_energy%enabled) then
+        armijo_backtracks = 0
+        armijo_bound = old_spread%objective + &
+                       wann_control%space_energy%armijo_constant*alphamin*doda0
+        ! Writing this as NOT(<=) also rejects NaN trial objectives.
+        do while (.not. (wann_spread%objective <= armijo_bound))
+          if (armijo_backtracks >= wann_control%space_energy%max_backtracks .or. &
+              alphamin*wann_control%space_energy%backtrack_factor < &
+              wann_control%space_energy%minimum_step) then
+            larmijo_stalled = .true.
+            exit
+          end if
+
+          alphamin = alphamin*wann_control%space_energy%backtrack_factor
+          armijo_backtracks = armijo_backtracks + 1
+          call internal_restore_and_evaluate_space_energy_step(alphamin, wann_spread)
+          if (allocated(error)) return
+          armijo_bound = old_spread%objective + &
+                         wann_control%space_energy%armijo_constant*alphamin*doda0
+        end do
+
+        if (larmijo_stalled) then
+          ! Restore the last accepted state so final output and checkpoints
+          ! can never contain a rejected uphill trial.
+          call internal_restore_and_evaluate_space_energy_step(0.0_dp, wann_spread)
+          if (allocated(error)) return
+          if (print_output%iprint > 0) then
+            write (stdout, '(3x,a,i0,a,es12.4)') 'Armijo line search stalled after ', &
+              armijo_backtracks, ' backtracks; last step = ', alphamin
+            write (stdout, '(3x,a)') 'Returning the last monotonically accepted localization state.'
+          end if
+          exit
+        else if (armijo_backtracks > 0) then
+          ! The accepted Armijo fallback has no curvature guarantee.  Force
+          ! Fletcher-Reeves to restart on the next iteration.
+          ncg = wann_control%num_cg_steps
+          gcfac = 0.0_dp
+          if (print_output%iprint > 0) then
+            write (stdout, '(3x,a,i0,a,es12.4,a)') 'Armijo accepted after ', armijo_backtracks, &
+              ' backtracks; step = ', alphamin, '; CG will restart'
+          end if
+        end if
       end if
 
       ! print the new centers and spreads
@@ -1166,7 +1245,8 @@ contains
       call io_stopwatch_stop('wann: main', timer)
     end if
 
-    if (.not. wann_control%lfixstep .and. optimisation <= 0) close (page_unit) !close scratch file
+    if ((.not. wann_control%lfixstep .or. wann_control%space_energy%enabled) .and. &
+        optimisation <= 0) close (page_unit) !close scratch file
 
     return
 
@@ -1174,6 +1254,82 @@ contains
 1001 format(2x, 'Sum of centres and spreads', 1x, '(', f10.6, ',', f10.6, ',', f10.6, ' )', f15.8)
 
   contains
+
+    !================================================!
+    subroutine internal_restore_and_evaluate_space_energy_step(step, spread)
+      !================================================!
+      !! Restore the iteration snapshot, apply one unitary step, and evaluate
+      !! the complete space-energy objective.  Used by Armijo backtracking.
+
+      implicit none
+
+      real(kind=dp), intent(in) :: step
+      type(localisation_vars_type), intent(out) :: spread
+
+      u_matrix_loc = u0_loc
+      if (optimisation <= 0) then
+        read (page_unit) m_matrix_loc
+        rewind (page_unit)
+      else
+        m_matrix_loc = m0_loc
+      end if
+
+      if (step /= 0.0_dp) then
+        cdq_loc(:, :, :) = cdqkeep_loc(:, :, :)*(step/(4.0_dp*kmesh_info%wbtot))
+        call internal_new_u_and_m(cdq, cmtmp, tmp_cdq, cwork, rwork, evals, cwschur1, cwschur2, &
+                                  cwschur3, cwschur4, cz, num_wann, num_kpts, kmesh_info, &
+                                  lsitesymmetry, cdq_loc, u_matrix_loc, m_matrix_loc, &
+                                  print_output%timing_level, stdout, sitesym, timer, nkrank, &
+                                  global_k, error, comm)
+        if (allocated(error)) return
+      end if
+
+      call wann_omega(csheet, sheet, rave, r2ave, rave2, spread, num_wann, kmesh_info, &
+                      num_kpts, print_output, wann_control%use_ss_functional, wann_control%constrain, &
+                      omega%invariant, ln_tmp_loc, m_matrix_loc, lambda_loc, first_pass, timer, &
+                      nkrank, global_k, error, comm)
+      if (allocated(error)) return
+      call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
+                                       eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                       energy_centre, energy_second, energy_spread, spatial_weight, &
+                                       energy_weight, spread, error, comm)
+      if (allocated(error)) return
+
+    end subroutine internal_restore_and_evaluate_space_energy_step
+
+    !================================================!
+    subroutine internal_space_energy_maximum_step(direction, wbtot, trust_radius, &
+                                                   direction_norm, maximum_step, error, comm)
+      !================================================!
+      !! Bound the largest per-k Frobenius norm of the anti-Hermitian update.
+
+      use w90_comms, only: comms_allreduce, w90_comm_type
+
+      implicit none
+
+      complex(kind=dp), intent(in) :: direction(:, :, :)
+      real(kind=dp), intent(in) :: wbtot, trust_radius
+      real(kind=dp), intent(out) :: direction_norm, maximum_step
+      type(w90_error_type), allocatable, intent(out) :: error
+      type(w90_comm_type), intent(in) :: comm
+
+      integer :: nkp_local
+      real(kind=dp) :: local_norm
+
+      direction_norm = 0.0_dp
+      do nkp_local = 1, size(direction, 3)
+        local_norm = sqrt(sum(abs(direction(:, :, nkp_local))**2))/(4.0_dp*wbtot)
+        direction_norm = max(direction_norm, local_norm)
+      end do
+      call comms_allreduce(direction_norm, 1, 'MAX', error, comm)
+      if (allocated(error)) return
+
+      maximum_step = huge(1.0_dp)
+      if (trust_radius > 0.0_dp .and. direction_norm > tiny(1.0_dp)) then
+        maximum_step = trust_radius/direction_norm
+      end if
+
+    end subroutine internal_space_energy_maximum_step
 
     !================================================!
     subroutine internal_test_convergence(old_spread, wann_spread, history, save_spread, iter, &
