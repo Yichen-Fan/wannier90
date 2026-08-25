@@ -768,6 +768,22 @@ contains
       return
     end if
 
+    call w90_readwrite_get_keyword(settings, 'write_info', found, error, comm, &
+                                   l_value=wann_control%space_energy%write_info)
+    if (allocated(error)) return
+    if (wann_control%space_energy%write_info .and. .not. wann_control%space_energy%enabled) then
+      call set_error_input(error, 'Error: write_info requires a nonzero sp_en_mix', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'num_occ', found, error, comm, &
+                                   i_value=wann_control%space_energy%num_occ)
+    if (allocated(error)) return
+    if (wann_control%space_energy%num_occ < 0) then
+      call set_error_input(error, 'Error: num_occ must be non-negative', comm)
+      return
+    end if
+
     wann_control%constrain%slwf_num = num_wann
     call w90_readwrite_get_keyword(settings, 'slwf_num', found, error, comm, &
                                    i_value=wann_control%constrain%slwf_num)
@@ -2108,6 +2124,12 @@ contains
           wann_control%space_energy%scale, '|'
         write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Space-energy p-norm power                 :', &
           wann_control%space_energy%power, '|'
+        write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Write space-energy information file      :', &
+          wann_control%space_energy%write_info, '|'
+        if (wann_control%space_energy%write_info) then
+          write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  Occupied bands for information file      :', &
+            wann_control%space_energy%num_occ, '|'
+        end if
       end if
       if (wann_control%guiding_centres%enable .or. print_output%iprint > 2) then
         write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  Iterations before starting guiding centres:', &

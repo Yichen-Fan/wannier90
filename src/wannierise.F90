@@ -35,7 +35,7 @@ module w90_wannierise_mod
 
   use w90_constants, only: dp
   use w90_error, only: w90_error_type, set_error_alloc, set_error_dealloc, set_error_fatal, &
-                       set_error_input, set_error_fatal, set_error_file
+                       set_error_input, set_error_file
   use w90_comms, only: w90_comm_type
 
   implicit none
@@ -65,7 +65,7 @@ contains
                        m_matrix_loc, u_matrix, real_lattice, wannier_centres_translated, irvec, &
                        mp_grid, ndegen, nrpts, num_kpts, num_proj, num_wann, optimisation, &
                        rpt_origin, bands_plot_mode, transport_mode, lsitesymmetry, stdout, &
-                       timer, dist_k, error, comm, eigval_subspace)
+                       timer, dist_k, error, comm, eigval_subspace, occupation_projector, seedname)
     !================================================!
     !
     !! Calculate the Unitary Rotations to give Maximally Localised Wannier Functions
@@ -114,6 +114,7 @@ contains
     real(kind=dp), intent(inout), allocatable :: wannier_centres_translated(:, :)
     real(kind=dp), intent(in) :: real_lattice(3, 3)
     real(kind=dp), intent(in), optional :: eigval_subspace(:, :)
+    complex(kind=dp), intent(in), optional :: occupation_projector(:, :, :)
 
     complex(kind=dp), intent(inout), allocatable :: ham_k(:, :, :)
     complex(kind=dp), intent(inout), allocatable :: ham_r(:, :, :)
@@ -125,6 +126,7 @@ contains
 
     character(len=*), intent(in) :: bands_plot_mode
     character(len=*), intent(in) :: transport_mode
+    character(len=*), intent(in), optional :: seedname
 
     ! local variables
     type(localisation_vars_type) :: old_spread
@@ -196,6 +198,13 @@ contains
     num_nodes = mpisize(comm)
     my_node_id = mpirank(comm)
     if (my_node_id == 0) on_root = .true.
+
+    if (wann_control%space_energy%write_info .and. &
+        (.not. present(occupation_projector) .or. .not. present(seedname))) then
+      call set_error_fatal(error, &
+                           'write_info requires an occupation projector and seedname in wann_main', comm)
+      return
+    end if
 
     if (print_output%timing_level > 0 .and. print_output%iprint > 0) then
       call io_stopwatch_start('wann: main', timer)
@@ -969,6 +978,14 @@ contains
           wann_spread%objective*print_output%lenconfac**2
         write (stdout, '(3x,a,f15.9)') 'Final total energy variance (eV^2) = ', wann_spread%energy_variance
       end if
+    end if
+
+    if (wann_control%space_energy%write_info) then
+      call wann_write_space_energy_info(seedname, rave, r2ave - rave2, energy_centre, &
+                                        energy_spread, u_matrix, occupation_projector, num_kpts, &
+                                        num_wann, wann_control%space_energy%num_occ, &
+                                        print_output%iprint, stdout, error, comm)
+      if (allocated(error)) return
     end if
 
     if (wann_control%guiding_centres%enable) then
@@ -1854,6 +1871,94 @@ contains
     end subroutine internal_new_u_and_m
 
   end subroutine wann_main
+
+  !================================================!
+  subroutine wann_write_space_energy_info(seedname, centre, spatial_spread, energy_centre, &
+                                          energy_spread, u_matrix, occupation_projector, &
+                                          num_kpts, num_wann, num_occ, iprint, stdout, error, comm)
+    !================================================!
+    !! Write final per-Wannier-function localization diagnostics.
+    !! Distances are always in Angstrom and energies are always in eV.
+
+    use w90_comms, only: comms_bcast, mpirank, w90_comm_type
+
+    implicit none
+
+    character(len=*), intent(in) :: seedname
+    integer, intent(in) :: num_kpts, num_wann, num_occ, iprint, stdout
+    real(kind=dp), intent(in) :: centre(:, :), spatial_spread(:)
+    real(kind=dp), intent(in) :: energy_centre(:), energy_spread(:)
+    complex(kind=dp), intent(in) :: u_matrix(:, :, :)
+    complex(kind=dp), intent(in) :: occupation_projector(:, :, :)
+    type(w90_error_type), allocatable, intent(out) :: error
+    type(w90_comm_type), intent(in) :: comm
+
+    integer :: close_ios, info_unit, ios, iw, jw, band, loop_kpt
+    real(kind=dp) :: occupation(num_wann)
+    complex(kind=dp) :: occupation_k
+
+    occupation = 0.0_dp
+    if (mpirank(comm) == 0 .and. num_occ > 0) then
+      do loop_kpt = 1, num_kpts
+        do iw = 1, num_wann
+          occupation_k = cmplx(0.0_dp, 0.0_dp, kind=dp)
+          do jw = 1, num_wann
+            do band = 1, num_wann
+              occupation_k = occupation_k + conjg(u_matrix(band, iw, loop_kpt))* &
+                occupation_projector(band, jw, loop_kpt)*u_matrix(jw, iw, loop_kpt)
+            end do
+          end do
+          occupation(iw) = occupation(iw) + real(occupation_k, dp)
+        end do
+      end do
+      occupation = occupation/real(num_kpts, dp)
+    end if
+
+    ios = 0
+    if (mpirank(comm) == 0) then
+      open (newunit=info_unit, file=trim(seedname)//'.info', form='formatted', &
+            status='replace', action='write', iostat=ios)
+    end if
+    call comms_bcast(ios, 1, error, comm)
+    if (allocated(error)) return
+    if (ios /= 0) then
+      call set_error_file(error, 'Error opening '//trim(seedname)//'.info', comm)
+      return
+    end if
+
+    if (mpirank(comm) == 0) then
+      if (num_occ > 0) then
+        write (info_unit, '(a4,1x,3(a8,1x),4(a10,1x))', iostat=ios) &
+          'WF', '<r>_x', '<r>_y', '<r>_z', '<Dr^2>', '<h>', '<Dh^2>', 'occ'
+        do iw = 1, num_wann
+          if (ios == 0) write (info_unit, '(i4,1x,3(f8.4,1x),4(f10.6,1x))', iostat=ios) &
+            iw, centre(:, iw), spatial_spread(iw), energy_centre(iw), energy_spread(iw), occupation(iw)
+        end do
+      else
+        write (info_unit, '(a4,1x,3(a8,1x),3(a10,1x))', iostat=ios) &
+          'WF', '<r>_x', '<r>_y', '<r>_z', '<Dr^2>', '<h>', '<Dh^2>'
+        do iw = 1, num_wann
+          if (ios == 0) write (info_unit, '(i4,1x,3(f8.4,1x),3(f10.6,1x))', iostat=ios) &
+            iw, centre(:, iw), spatial_spread(iw), energy_centre(iw), energy_spread(iw)
+        end do
+      end if
+      close_ios = 0
+      close (info_unit, iostat=close_ios)
+      if (ios == 0) ios = close_ios
+    end if
+
+    call comms_bcast(ios, 1, error, comm)
+    if (allocated(error)) return
+    if (ios /= 0) then
+      call set_error_file(error, 'Error writing '//trim(seedname)//'.info', comm)
+      return
+    end if
+
+    if (mpirank(comm) == 0 .and. iprint > 0) then
+      write (stdout, '(3x,a)') 'Space-energy information written to '//trim(seedname)//'.info'
+    end if
+
+  end subroutine wann_write_space_energy_info
 
   !================================================!
   pure subroutine wann_stable_pnorm(value_1, value_2, power, norm, deriv_1, deriv_2)

@@ -852,6 +852,30 @@ one produce orbital-dependent marginal spatial and energy weights.
 
 The default value is 1.0.
 
+### `logical :: write_info`
+
+Write the final per-Wannier-function localization data to
+`seedname.info`. The columns contain the Cartesian centre in Å, the
+spatial variance in Å$^2$, the energy centre in eV, the energy variance
+in eV$^2$, and, when `num_occ` is positive, the occupation. The file is
+replaced by the final state of the current run, so it cannot silently
+retain data from an older localization.
+
+This option requires a nonzero `sp_en_mix`. The default value is
+`false`.
+
+### `integer :: num_occ`
+
+Set the number of occupied input Bloch bands per k-point used for the
+occupation column of `seedname.info`. Band indices refer to the bands
+remaining after `exclude_bands` is applied. For a disentangled manifold,
+the occupation uses the complete transformation $U_{\rm opt}U$ and not
+the final localization rotation $U$ alone. The occupations sum to
+`num_occ` when the selected smooth subspace fully contains the specified
+occupied manifold; otherwise their sum measures its projected weight.
+
+The default value is 0, which omits the occupation column.
+
 For example, a $p=2$ calculation using the molecular $C=1000$
 conversion can be requested with
 
@@ -859,6 +883,8 @@ conversion can be requested with
 sp_en_mix = 0.5
 sp_en_scale = 0.3781820678533007
 sp_en_power = 2.0
+write_info = true
+num_occ = 4
 ```
 
 ### `real(kind=dp) :: conv_noise_amp`

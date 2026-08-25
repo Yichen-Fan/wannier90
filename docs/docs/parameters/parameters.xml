@@ -607,6 +607,26 @@
     <required>False</required>
   </parameter>
   <parameter tool="w90">
+    <name>write_info</name>
+    <type>L</type>
+    <description>Write final per-Wannier-function space-energy diagnostics to seedname.info</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>False</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>num_occ</name>
+    <type>I</type>
+    <description>Number of occupied input Bloch bands used for occupations in seedname.info</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>0</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
     <name>conv_noise_amp</name>
     <type>R</type>
     <description>The amplitude of random noise applied towards end of minimisation procedure</description>

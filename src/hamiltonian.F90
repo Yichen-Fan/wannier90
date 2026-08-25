@@ -43,6 +43,7 @@ module w90_hamiltonian
 
   public :: hamiltonian_dealloc
   public :: hamiltonian_get_hr
+  public :: hamiltonian_get_occupation_projector
   public :: hamiltonian_get_subspace_eigenvalues
   public :: hamiltonian_setup
   public :: hamiltonian_write_hr
@@ -95,6 +96,61 @@ contains
     end do
 
   end subroutine hamiltonian_get_subspace_eigenvalues
+
+  !================================================!
+  subroutine hamiltonian_get_occupation_projector(dis_manifold, occupation_projector, &
+                                                   num_kpts, num_wann, num_occ, &
+                                                   have_disentangled, u_matrix_opt)
+    !================================================!
+    !! Project the occupied input Bloch bands into the smooth Wannier subspace.
+    !!
+    !! The final Wannier occupations are the diagonal elements of
+    !! U^dagger P_occ_subspace U.  Keeping this projector separate from the
+    !! final localization rotation is essential after disentanglement, where
+    !! the full transformation is U_opt U rather than U alone.
+
+    use w90_types, only: dis_manifold_type
+
+    implicit none
+
+    type(dis_manifold_type), intent(in) :: dis_manifold
+    integer, intent(in) :: num_kpts, num_wann, num_occ
+    complex(kind=dp), intent(out) :: occupation_projector(:, :, :)
+    logical, intent(in) :: have_disentangled
+    complex(kind=dp), intent(in), optional :: u_matrix_opt(:, :, :)
+
+    integer :: band, counter, iw, jw, loop_kpt
+
+    occupation_projector = cmplx(0.0_dp, 0.0_dp, kind=dp)
+    if (num_occ == 0) return
+
+    if (.not. have_disentangled) then
+      do loop_kpt = 1, num_kpts
+        do iw = 1, min(num_occ, num_wann)
+          occupation_projector(iw, iw, loop_kpt) = cmplx(1.0_dp, 0.0_dp, kind=dp)
+        end do
+      end do
+      return
+    end if
+
+    do loop_kpt = 1, num_kpts
+      counter = 0
+      do band = 1, size(dis_manifold%lwindow, 1)
+        if (dis_manifold%lwindow(band, loop_kpt)) then
+          counter = counter + 1
+          if (band <= num_occ) then
+            do jw = 1, num_wann
+              do iw = 1, num_wann
+                occupation_projector(iw, jw, loop_kpt) = occupation_projector(iw, jw, loop_kpt) + &
+                  conjg(u_matrix_opt(counter, iw, loop_kpt))*u_matrix_opt(counter, jw, loop_kpt)
+              end do
+            end do
+          end if
+        end if
+      end do
+    end do
+
+  end subroutine hamiltonian_get_occupation_projector
 
   !================================================!
 

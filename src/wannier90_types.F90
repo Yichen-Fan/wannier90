@@ -193,6 +193,10 @@ module w90_wannier90_types
     !! Energy-variance scale C in Angstrom^2/eV^2.
     real(kind=dp) :: power = 1.0_dp
     !! Power p of the per-Wannier-function p-norm; p >= 1.
+    logical :: write_info = .false.
+    !! Write final per-WF space, energy, and optional occupation data to seedname.info.
+    integer :: num_occ = 0
+    !! Number of occupied input Bloch bands used to form the occupation projector.
   end type wann_space_energy_type
 
   type wann_control_type ! only in wannierise.F90

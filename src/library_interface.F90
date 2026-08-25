@@ -702,7 +702,8 @@ contains
     use w90_comms, only: mpirank, comms_sync_error
     use w90_error_base, only: w90_error_type
     use w90_error, only: set_error_fatal
-    use w90_hamiltonian, only: hamiltonian_get_subspace_eigenvalues
+    use w90_hamiltonian, only: hamiltonian_get_occupation_projector, &
+                               hamiltonian_get_subspace_eigenvalues
     use w90_wannierise_mod, only: wann_main, wann_main_gamma
 
     implicit none
@@ -715,6 +716,7 @@ contains
     ! local variables
     type(w90_error_type), allocatable :: error
     real(kind=dp), allocatable :: eigval_subspace(:, :)
+    complex(kind=dp), allocatable :: occupation_projector(:, :, :)
 
     ierr = 0
 
@@ -744,6 +746,9 @@ contains
         call set_error_fatal(error, 'Error: eigenvalues not set for space-energy localization', common_data%comm)
       else if (common_data%have_disentangled .and. .not. associated(common_data%u_matrix_opt)) then
         call set_error_fatal(error, 'Error: u_matrix_opt not set for space-energy localization', common_data%comm)
+      else if (common_data%wann_control%space_energy%write_info .and. &
+               common_data%wann_control%space_energy%num_occ > common_data%num_bands) then
+        call set_error_fatal(error, 'Error: num_occ cannot exceed num_bands', common_data%comm)
       end if
     end if
     if (allocated(error)) then
@@ -769,6 +774,28 @@ contains
                                                   eigval_subspace, common_data%num_kpts, &
                                                   common_data%num_wann, common_data%have_disentangled)
       end if
+
+      if (common_data%wann_control%space_energy%write_info) then
+        allocate (occupation_projector(common_data%num_wann, common_data%num_wann, &
+                                       common_data%num_kpts), stat=ierr)
+        if (ierr /= 0) then
+          call set_error_fatal(error, 'Error allocating occupation projector for space-energy information', &
+                               common_data%comm)
+          call prterr(error, ierr, istdout, istderr, common_data%comm)
+          return
+        end if
+        if (common_data%have_disentangled) then
+          call hamiltonian_get_occupation_projector(common_data%dis_manifold, occupation_projector, &
+                                                    common_data%num_kpts, common_data%num_wann, &
+                                                    common_data%wann_control%space_energy%num_occ, &
+                                                    common_data%have_disentangled, common_data%u_matrix_opt)
+        else
+          call hamiltonian_get_occupation_projector(common_data%dis_manifold, occupation_projector, &
+                                                    common_data%num_kpts, common_data%num_wann, &
+                                                    common_data%wann_control%space_energy%num_occ, &
+                                                    common_data%have_disentangled)
+        end if
+      end if
     end if
 
     if (common_data%gamma_only) then
@@ -790,17 +817,32 @@ contains
       end if
     else
       if (common_data%wann_control%space_energy%enabled) then
-        call wann_main(common_data%ham_logical, common_data%kmesh_info, common_data%kpt_latt, &
-                       common_data%wann_control, common_data%omega, common_data%sitesym, &
-                       common_data%print_output, common_data%wannier_data, common_data%ws_region, &
-                       common_data%w90_calculation, common_data%ham_k, common_data%ham_r, &
-                       common_data%m_matrix_local, common_data%u_matrix, common_data%real_lattice, &
-                       common_data%wannier_centres_translated, common_data%irvec, &
-                       common_data%mp_grid, common_data%ndegen, common_data%nrpts, &
-                       common_data%num_kpts, common_data%num_proj, common_data%num_wann, &
-                       common_data%optimisation, common_data%rpt_origin, common_data%band_plot%mode, &
-                       common_data%tran%mode, common_data%lsitesymmetry, istdout, common_data%timer, &
-                       common_data%dist_kpoints, error, common_data%comm, eigval_subspace)
+        if (common_data%wann_control%space_energy%write_info) then
+          call wann_main(common_data%ham_logical, common_data%kmesh_info, common_data%kpt_latt, &
+                         common_data%wann_control, common_data%omega, common_data%sitesym, &
+                         common_data%print_output, common_data%wannier_data, common_data%ws_region, &
+                         common_data%w90_calculation, common_data%ham_k, common_data%ham_r, &
+                         common_data%m_matrix_local, common_data%u_matrix, common_data%real_lattice, &
+                         common_data%wannier_centres_translated, common_data%irvec, &
+                         common_data%mp_grid, common_data%ndegen, common_data%nrpts, &
+                         common_data%num_kpts, common_data%num_proj, common_data%num_wann, &
+                         common_data%optimisation, common_data%rpt_origin, common_data%band_plot%mode, &
+                         common_data%tran%mode, common_data%lsitesymmetry, istdout, common_data%timer, &
+                         common_data%dist_kpoints, error, common_data%comm, eigval_subspace, &
+                         occupation_projector, common_data%seedname)
+        else
+          call wann_main(common_data%ham_logical, common_data%kmesh_info, common_data%kpt_latt, &
+                         common_data%wann_control, common_data%omega, common_data%sitesym, &
+                         common_data%print_output, common_data%wannier_data, common_data%ws_region, &
+                         common_data%w90_calculation, common_data%ham_k, common_data%ham_r, &
+                         common_data%m_matrix_local, common_data%u_matrix, common_data%real_lattice, &
+                         common_data%wannier_centres_translated, common_data%irvec, &
+                         common_data%mp_grid, common_data%ndegen, common_data%nrpts, &
+                         common_data%num_kpts, common_data%num_proj, common_data%num_wann, &
+                         common_data%optimisation, common_data%rpt_origin, common_data%band_plot%mode, &
+                         common_data%tran%mode, common_data%lsitesymmetry, istdout, common_data%timer, &
+                         common_data%dist_kpoints, error, common_data%comm, eigval_subspace)
+        end if
       else
         call wann_main(common_data%ham_logical, common_data%kmesh_info, common_data%kpt_latt, &
                        common_data%wann_control, common_data%omega, common_data%sitesym, &
