@@ -806,6 +806,61 @@ algorithm to save memory.
 
 The default value is `false`.
 
+### `real(kind=dp) :: sp_en_mix`
+
+Enable joint real-space and energy-variance localization and set its
+mixing parameter $\gamma$, with $0\leq\gamma\leq1$. For Wannier function
+$n$, the minimized contribution is
+
+$$
+\left(\left[(1-\gamma)s_n\right]^p
++\left[\gamma C e_n\right]^p\right)^{1/p},
+$$
+
+where $s_n$ is the real-space spread in Å$^2$ and $e_n$ is the energy
+variance in eV$^2$. The space-energy localizer is enabled when this
+keyword is nonzero; omitting it or setting it to zero preserves the
+ordinary MLWF functional.
+
+The current implementation supports the general, non-`gamma_only`,
+Marzari-Vanderbilt localization path. Selective localization,
+`site_symmetry`, `use_ss_functional`, and `precond` are not yet supported
+in combination with this localizer.
+
+The default value is 0.0 (disabled).
+
+### `real(kind=dp) :: sp_en_scale`
+
+Set the energy-variance scale $C$ in Å$^2$/eV$^2$. To convert a molecular
+value expressed in Bohr$^2$/Hartree$^2$, use
+
+$$
+C_{\mathrm{W90}}=C_{\mathrm{mol}}
+\left(a_0[\mathrm{\mathring A}]\,E_{\mathrm{h}}[\mathrm{eV}]^{-1}\right)^2
+=0.0003781820678533007\,C_{\mathrm{mol}}.
+$$
+
+For example, $C_{\mathrm{mol}}=1000$ corresponds to
+`sp_en_scale = 0.3781820678533007`. The default value is 1.0, which
+reproduces the implicit scale of the former $p=1$ W90 implementation.
+
+### `real(kind=dp) :: sp_en_power`
+
+Set the p-norm power $p\geq1$. `sp_en_power = 1` recovers the additive
+space-energy functional used by the former implementation. Values above
+one produce orbital-dependent marginal spatial and energy weights.
+
+The default value is 1.0.
+
+For example, a $p=2$ calculation using the molecular $C=1000$
+conversion can be requested with
+
+```vi title="Input file"
+sp_en_mix = 0.5
+sp_en_scale = 0.3781820678533007
+sp_en_power = 2.0
+```
+
 ### `real(kind=dp) :: conv_noise_amp`
 
 If `conv_noise_amp`$\:>0$, once convergence (as defined above) is

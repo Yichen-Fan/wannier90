@@ -78,7 +78,7 @@ clean:
 	rm -f *.o *.mod *.MOD *.obj
 
 library_interface.o : library_interface.F90 \
-	comms.o constants.o error_base.o io.o kmesh.o overlap.o plot.o transport.o \
+	comms.o constants.o error_base.o hamiltonian.o io.o kmesh.o overlap.o plot.o transport.o \
 	types.o wannier90_readwrite.o wannier90_types.o wannierise.o
 	 $(COMPILER) $(POSTOPTS) $(FCOPTS) -c $<
 

@@ -53,6 +53,8 @@ module w90_wannierise_mod
     real(kind=dp) :: om_tot !! Total
     real(kind=dp) :: om_iod !! Combined I-OD term for selective localization
     real(kind=dp) :: om_nu  !! Lagrange multiplier term due to constrained centres
+    real(kind=dp) :: energy_variance !! Sum of per-WF energy variances in eV^2
+    real(kind=dp) :: objective !! Functional actually minimized, in internal Angstrom^2 units
   end type localisation_vars_type
 
 contains
@@ -63,7 +65,7 @@ contains
                        m_matrix_loc, u_matrix, real_lattice, wannier_centres_translated, irvec, &
                        mp_grid, ndegen, nrpts, num_kpts, num_proj, num_wann, optimisation, &
                        rpt_origin, bands_plot_mode, transport_mode, lsitesymmetry, stdout, &
-                       timer, dist_k, error, comm)
+                       timer, dist_k, error, comm, eigval_subspace)
     !================================================!
     !
     !! Calculate the Unitary Rotations to give Maximally Localised Wannier Functions
@@ -111,6 +113,7 @@ contains
     real(kind=dp), intent(in) :: kpt_latt(:, :)
     real(kind=dp), intent(inout), allocatable :: wannier_centres_translated(:, :)
     real(kind=dp), intent(in) :: real_lattice(3, 3)
+    real(kind=dp), intent(in), optional :: eigval_subspace(:, :)
 
     complex(kind=dp), intent(inout), allocatable :: ham_k(:, :, :)
     complex(kind=dp), intent(inout), allocatable :: ham_r(:, :, :)
@@ -134,6 +137,8 @@ contains
     real(kind=dp), allocatable :: ln_tmp_loc(:, :, :)
     real(kind=dp), allocatable :: sheet(:, :, :)
     real(kind=dp), allocatable :: rave(:, :), r2ave(:), rave2(:)
+    real(kind=dp), allocatable :: energy_centre(:), energy_second(:), energy_spread(:)
+    real(kind=dp), allocatable :: spatial_weight(:), energy_weight(:)
     ! guiding centres
     real(kind=dp), allocatable :: rguide(:, :)
 
@@ -146,6 +151,7 @@ contains
     complex(kind=dp), allocatable :: k_to_r(:, :)
     complex(kind=dp), allocatable :: cdodq_precond(:, :, :)
     complex(kind=dp), allocatable :: cdodq_precond_loc(:, :, :)
+    complex(kind=dp), allocatable :: energy_gradient(:, :, :)
 
     !local arrays not passed into subroutines
     complex(kind=dp), allocatable  :: cwschur1(:), cwschur2(:)
@@ -266,6 +272,12 @@ contains
       call set_error_alloc(error, 'Error in allocating rave2 in wann_main', comm)
       return
     end if
+    allocate (energy_centre(num_wann), energy_second(num_wann), energy_spread(num_wann), &
+              spatial_weight(num_wann), energy_weight(num_wann), stat=ierr)
+    if (ierr /= 0) then
+      call set_error_alloc(error, 'Error allocating space-energy arrays in wann_main', comm)
+      return
+    end if
     allocate (rguide(3, num_wann), stat=ierr)
     if (ierr /= 0) then
       call set_error_alloc(error, 'Error in allocating rguide in wann_main', comm)
@@ -309,6 +321,8 @@ contains
 
     csheet = cmplx_1; cdodq = cmplx_0
     sheet = 0.0_dp; rave = 0.0_dp; r2ave = 0.0_dp; rave2 = 0.0_dp; rguide = 0.0_dp
+    energy_centre = 0.0_dp; energy_second = 0.0_dp; energy_spread = 0.0_dp
+    spatial_weight = 1.0_dp; energy_weight = 0.0_dp
 
     ! sub vars not passed into other subs
     allocate (cwschur1(num_wann), cwschur2(10*num_wann), stat=ierr)
@@ -369,6 +383,11 @@ contains
       call set_error_alloc(error, 'Error in allocating cdodq_loc in wann_main', comm)
       return
     end if
+    allocate (energy_gradient(num_wann, num_wann, nkrank), stat=ierr)
+    if (ierr /= 0) then
+      call set_error_alloc(error, 'Error allocating energy_gradient in wann_main', comm)
+      return
+    end if
     allocate (cdqkeep_loc(num_wann, num_wann, nkrank), stat=ierr)
     if (ierr /= 0) then
       call set_error_alloc(error, 'Error in allocating cdqkeep_loc in wann_main', comm)
@@ -419,6 +438,7 @@ contains
 
     cwschur1 = cmplx_0; cwschur2 = cmplx_0; cwschur3 = cmplx_0; cwschur4 = cmplx_0
     cdq = cmplx_0; cz = cmplx_0; cmtmp = cmplx_0; cdqkeep_loc = cmplx_0; cdq_loc = cmplx_0
+    energy_gradient = cmplx_0
     gcnorm1 = 0.0_dp; gcnorm0 = 0.0_dp
 
     ! initialise rguide to projection centres (Cartesians in units of Ang)
@@ -434,9 +454,17 @@ contains
       write (stdout, '(1x,a)') '*------------------------------- WANNIERISE ---------------------------------*'
       write (stdout, '(1x,a)') '+--------------------------------------------------------------------+<-- CONV'
       if (trim(print_output%length_unit) == 'Ang') then
-        write (stdout, '(1x,a)') '| Iter  Delta Spread     RMS Gradient      Spread (Ang^2)      Time  |<-- CONV'
+        if (wann_control%space_energy%enabled) then
+          write (stdout, '(1x,a)') '| Iter  Delta Cost       RMS Gradient      Spread (Ang^2)      Time  |<-- CONV'
+        else
+          write (stdout, '(1x,a)') '| Iter  Delta Spread     RMS Gradient      Spread (Ang^2)      Time  |<-- CONV'
+        end if
       else
-        write (stdout, '(1x,a)') '| Iter  Delta Spread     RMS Gradient      Spread (Bohr^2)     Time  |<-- CONV'
+        if (wann_control%space_energy%enabled) then
+          write (stdout, '(1x,a)') '| Iter  Delta Cost       RMS Gradient      Spread (Bohr^2)     Time  |<-- CONV'
+        else
+          write (stdout, '(1x,a)') '| Iter  Delta Spread     RMS Gradient      Spread (Bohr^2)     Time  |<-- CONV'
+        end if
       end if
       write (stdout, '(1x,a)') '+--------------------------------------------------------------------+<-- CONV'
       write (stdout, *)
@@ -464,6 +492,17 @@ contains
                     omega%invariant, ln_tmp_loc, m_matrix_loc, lambda_loc, first_pass, timer, &
                     nkrank, global_k, error, comm)
     if (allocated(error)) return
+    if (wann_control%space_energy%enabled) then
+      if (.not. present(eigval_subspace)) then
+        call set_error_fatal(error, 'Missing subspace eigenvalues for space-energy localization', comm)
+        return
+      end if
+      call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
+                                       eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                       energy_centre, energy_second, energy_spread, spatial_weight, &
+                                       energy_weight, wann_spread, error, comm)
+      if (allocated(error)) return
+    end if
 
     ! public variables
     if (.not. wann_control%constrain%selective_loc) then
@@ -485,6 +524,7 @@ contains
     ncg = 0
     iter = 0
     old_spread%om_tot = 0.0_dp
+    old_spread%objective = 0.0_dp
 
     ! print initial state
     if (print_output%iprint > 0) then
@@ -499,7 +539,7 @@ contains
       write (stdout, *)
       if (wann_control%constrain%selective_loc .and. wann_control%constrain%constrain) then
         write (stdout, '(1x,i6,2x,E12.3,2x,F15.10,2x,F18.10,3x,F8.2,2x,a)') iter, &
-          (wann_spread%om_tot - old_spread%om_tot)*print_output%lenconfac**2, &
+          (wann_spread%objective - old_spread%objective)*print_output%lenconfac**2, &
           sqrt(abs(gcnorm1))*print_output%lenconfac, &
           wann_spread%om_tot*print_output%lenconfac**2, io_wallclocktime(), '<-- CONV'
         write (stdout, '(7x,a,F15.7,a,F15.7,a,F15.7,a,F15.7,a)') &
@@ -509,7 +549,7 @@ contains
         write (stdout, '(1x,a78)') repeat('-', 78)
       elseif (wann_control%constrain%selective_loc .and. .not. wann_control%constrain%constrain) then
         write (stdout, '(1x,i6,2x,E12.3,2x,F15.10,2x,F18.10,3x,F8.2,2x,a)') iter, &
-          (wann_spread%om_tot - old_spread%om_tot)*print_output%lenconfac**2, &
+          (wann_spread%objective - old_spread%objective)*print_output%lenconfac**2, &
           sqrt(abs(gcnorm1))*print_output%lenconfac, &
           wann_spread%om_tot*print_output%lenconfac**2, io_wallclocktime(), '<-- CONV'
         write (stdout, '(7x,a,F15.7,a,F15.7,a,F15.7,a)') &
@@ -519,7 +559,7 @@ contains
         write (stdout, '(1x,a78)') repeat('-', 78)
       else
         write (stdout, '(1x,i6,2x,E12.3,2x,F15.10,2x,F18.10,3x,F8.2,2x,a)') iter, &
-          (wann_spread%om_tot - old_spread%om_tot)*print_output%lenconfac**2, &
+          (wann_spread%objective - old_spread%objective)*print_output%lenconfac**2, &
           sqrt(abs(gcnorm1))*print_output%lenconfac, &
           wann_spread%om_tot*print_output%lenconfac**2, io_wallclocktime(), '<-- CONV'
         write (stdout, '(8x,a,F15.7,a,F15.7,a,F15.7,a)') &
@@ -527,6 +567,11 @@ contains
           wann_spread%om_od*print_output%lenconfac**2, &
           ' O_TOT=', wann_spread%om_tot*print_output%lenconfac**2, ' <-- SPRD'
         write (stdout, '(1x,a78)') repeat('-', 78)
+      end if
+      if (wann_control%space_energy%enabled) then
+        write (stdout, '(3x,a,f15.9)') 'Space-energy objective = ', &
+          wann_spread%objective*print_output%lenconfac**2
+        write (stdout, '(3x,a,f15.9)') 'Total energy variance (eV^2) = ', wann_spread%energy_variance
       end if
     end if
 
@@ -565,7 +610,18 @@ contains
       end if
 
       ! calculate gradient of omega
-      if (lsitesymmetry .or. wann_control%precond) then
+      if (wann_control%space_energy%enabled) then
+        call wann_domega(csheet, sheet, rave, num_wann, kmesh_info, num_kpts, &
+                         wann_control%constrain, wann_control%use_ss_functional, lsitesymmetry, &
+                         ln_tmp_loc, m_matrix_loc, rnkb_loc, cdodq_loc, lambda_loc, &
+                         print_output%timing_level, sitesym, timer, nkrank, global_k, error, comm, &
+                         print_output%iprint, orbital_weight=spatial_weight)
+        if (allocated(error)) return
+
+        call wann_space_energy_gradient(u_matrix_loc, eigval_subspace, energy_centre, energy_weight, &
+                                        num_kpts, num_wann, nkrank, global_k, energy_gradient)
+        cdodq_loc = cdodq_loc + energy_gradient
+      else if (lsitesymmetry .or. wann_control%precond) then
         call wann_domega(csheet, sheet, rave, num_wann, kmesh_info, num_kpts, &
                          wann_control%constrain, wann_control%use_ss_functional, lsitesymmetry, &
                          ln_tmp_loc, m_matrix_loc, rnkb_loc, cdodq_loc, lambda_loc, &
@@ -640,6 +696,13 @@ contains
                         omega%invariant, ln_tmp_loc, m_matrix_loc, lambda_loc, first_pass, timer, &
                         nkrank, global_k, error, comm)
         if (allocated(error)) return
+        if (wann_control%space_energy%enabled) then
+          call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
+                                           eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                           energy_centre, energy_second, energy_spread, spatial_weight, &
+                                           energy_weight, trial_spread, error, comm)
+          if (allocated(error)) return
+        end if
 
         ! Calculate optimal step (alphamin)
         call internal_optimal_step(wann_spread, trial_spread, doda0, alphamin, falphamin, lquad, &
@@ -648,11 +711,11 @@ contains
 
       ! print line search information
       if (lprint .and. print_output%iprint > 2) then
-        write (stdout, *) ' LINE --> Spread at initial point       :', &
-          wann_spread%om_tot*print_output%lenconfac**2
+        write (stdout, *) ' LINE --> Functional at initial point   :', &
+          wann_spread%objective*print_output%lenconfac**2
         if (.not. wann_control%lfixstep) &
-          write (stdout, *) ' LINE --> Spread at trial step          :', &
-          trial_spread%om_tot*print_output%lenconfac**2
+          write (stdout, *) ' LINE --> Functional at trial step      :', &
+          trial_spread%objective*print_output%lenconfac**2
         write (stdout, *) ' LINE --> Slope along search direction  :', &
           doda0*print_output%lenconfac**2
         write (stdout, *) ' LINE --> ||SD gradient||^2             :', &
@@ -661,7 +724,7 @@ contains
           write (stdout, *) ' LINE --> Trial step length             :', wann_control%trial_step
           if (lquad) then
             write (stdout, *) ' LINE --> Optimal parabolic step length :', alphamin
-            write (stdout, *) ' LINE --> Spread at predicted minimum   :', &
+            write (stdout, *) ' LINE --> Functional at predicted min.  :', &
               falphamin*print_output%lenconfac**2
           end if
         else
@@ -703,6 +766,13 @@ contains
                         omega%invariant, ln_tmp_loc, m_matrix_loc, lambda_loc, first_pass, timer, &
                         nkrank, global_k, error, comm)
         if (allocated(error)) return
+        if (wann_control%space_energy%enabled) then
+          call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
+                                           eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                           energy_centre, energy_second, energy_spread, spatial_weight, &
+                                           energy_weight, wann_spread, error, comm)
+          if (allocated(error)) return
+        end if
 
         ! parabolic line search was unsuccessful, use trial step already taken
       else
@@ -723,7 +793,7 @@ contains
         write (stdout, *)
         if (wann_control%constrain%selective_loc .and. wann_control%constrain%constrain) then
           write (stdout, '(1x,i6,2x,E12.3,2x,F15.10,2x,F18.10,3x,F8.2,2x,a)') &
-            iter, (wann_spread%om_tot - old_spread%om_tot)*print_output%lenconfac**2, &
+            iter, (wann_spread%objective - old_spread%objective)*print_output%lenconfac**2, &
             sqrt(abs(gcnorm1))*print_output%lenconfac, &
             wann_spread%om_tot*print_output%lenconfac**2, io_wallclocktime(), '<-- CONV'
           write (stdout, '(7x,a,F15.7,a,F15.7,a,F15.7,a)') &
@@ -738,7 +808,7 @@ contains
           write (stdout, '(1x,a78)') repeat('-', 78)
         elseif (wann_control%constrain%selective_loc .and. .not. wann_control%constrain%constrain) then
           write (stdout, '(1x,i6,2x,E12.3,2x,F15.10,2x,F18.10,3x,F8.2,2x,a)') &
-            iter, (wann_spread%om_tot - old_spread%om_tot)*print_output%lenconfac**2, &
+            iter, (wann_spread%objective - old_spread%objective)*print_output%lenconfac**2, &
             sqrt(abs(gcnorm1))*print_output%lenconfac, &
             wann_spread%om_tot*print_output%lenconfac**2, io_wallclocktime(), '<-- CONV'
           write (stdout, '(7x,a,F15.7,a,F15.7,a,F15.7,a)') &
@@ -752,7 +822,7 @@ contains
           write (stdout, '(1x,a78)') repeat('-', 78)
         else
           write (stdout, '(1x,i6,2x,E12.3,2x,F15.10,2x,F18.10,3x,F8.2,2x,a)') &
-            iter, (wann_spread%om_tot - old_spread%om_tot)*print_output%lenconfac**2, &
+            iter, (wann_spread%objective - old_spread%objective)*print_output%lenconfac**2, &
             sqrt(abs(gcnorm1))*print_output%lenconfac, &
             wann_spread%om_tot*print_output%lenconfac**2, io_wallclocktime(), '<-- CONV'
           write (stdout, '(8x,a,F15.7,a,F15.7,a,F15.7,a)') &
@@ -764,6 +834,11 @@ contains
             ' O_OD=', (wann_spread%om_od - old_spread%om_od)*print_output%lenconfac**2, &
             ' O_TOT=', (wann_spread%om_tot - old_spread%om_tot)*print_output%lenconfac**2, ' <-- DLTA'
           write (stdout, '(1x,a78)') repeat('-', 78)
+        end if
+        if (wann_control%space_energy%enabled) then
+          write (stdout, '(3x,a,f15.9)') 'Space-energy objective = ', &
+            wann_spread%objective*print_output%lenconfac**2
+          write (stdout, '(3x,a,f15.9)') 'Total energy variance (eV^2) = ', wann_spread%energy_variance
         end if
       end if
 
@@ -888,6 +963,11 @@ contains
         write (stdout, '(3x,a21,a,f15.9)') 'Final Spread ('//trim(print_output%length_unit)//'^2)', &
           '       Omega Total  = ', wann_spread%om_tot*print_output%lenconfac**2
         write (stdout, '(1x,a78)') repeat('-', 78)
+      end if
+      if (wann_control%space_energy%enabled) then
+        write (stdout, '(3x,a,f15.9)') 'Final space-energy objective = ', &
+          wann_spread%objective*print_output%lenconfac**2
+        write (stdout, '(3x,a,f15.9)') 'Final total energy variance (eV^2) = ', wann_spread%energy_variance
       end if
     end if
 
@@ -1117,7 +1197,7 @@ contains
         return
       end if
 
-      delta_omega = wann_spread%om_tot - old_spread%om_tot
+      delta_omega = wann_spread%objective - old_spread%objective
 
       if (iter .le. wann_control%conv_window) then
         history(iter) = delta_omega
@@ -1140,15 +1220,15 @@ contains
           (noise_count .lt. wann_control%conv_noise_num)) then
         if (lfirst) then
           lfirst = .false.
-          save_spread = wann_spread%om_tot
+          save_spread = wann_spread%objective
           lrandom = .true.
           conv_count = 0
         else
-          if (abs(save_spread - wann_spread%om_tot) .lt. wann_control%conv_tol) then
+          if (abs(save_spread - wann_spread%objective) .lt. wann_control%conv_tol) then
             lconverged = .true.
             return
           else
-            save_spread = wann_spread%om_tot
+            save_spread = wann_spread%objective
             lrandom = .true.
             conv_count = 0
           end if
@@ -1574,27 +1654,27 @@ contains
         call io_stopwatch_start('wann: main: optimal_step', timer)
       end if
 
-      fac = trial_spread%om_tot - wann_spread%om_tot
+      fac = trial_spread%objective - wann_spread%objective
       if (abs(fac) .gt. tiny(1.0_dp)) then
         fac = 1.0_dp/fac
         shift = 1.0_dp
       else
         fac = 1.0e6_dp
-        shift = fac*trial_spread%om_tot - fac*wann_spread%om_tot
+        shift = fac*trial_spread%objective - fac*wann_spread%objective
       end if
       eqb = fac*doda0
       eqa = shift - eqb*trial_step
-      if (abs(eqa/(fac*wann_spread%om_tot)) .gt. epsilon(1.0_dp)) then
+      if (abs(eqa/(fac*wann_spread%objective)) .gt. epsilon(1.0_dp)) then
         lquad = .true.
         alphamin = -0.5_dp*eqb/eqa*(trial_step**2)
-        falphamin = wann_spread%om_tot &
+        falphamin = wann_spread%objective &
                     - 0.25_dp*eqb*eqb/(fac*eqa)*(trial_step**2)
       else
         if (lprint .and. print_output%iprint > 2) write (stdout, *) &
           ' LINE --> Parabolic line search unstable: using trial step'
         lquad = .false.
         alphamin = trial_step
-        falphamin = trial_spread%om_tot
+        falphamin = trial_spread%objective
       end if
 
       if (doda0*alphamin .gt. 0.0_dp) then
@@ -1602,7 +1682,7 @@ contains
           ' LINE --> Line search unstable : using trial step'
         lquad = .false.
         alphamin = trial_step
-        falphamin = trial_spread%om_tot
+        falphamin = trial_spread%objective
       end if
 
       if (print_output%timing_level > 1 .and. print_output%iprint > 0) then
@@ -1774,6 +1854,160 @@ contains
     end subroutine internal_new_u_and_m
 
   end subroutine wann_main
+
+  !================================================!
+  pure subroutine wann_stable_pnorm(value_1, value_2, power, norm, deriv_1, deriv_2)
+    !================================================!
+    !! Stable two-component p-norm and its derivatives for non-negative inputs.
+
+    implicit none
+
+    real(kind=dp), intent(in) :: value_1, value_2, power
+    real(kind=dp), intent(out) :: norm, deriv_1, deriv_2
+
+    real(kind=dp) :: common, powered_sum, ratio_1, ratio_2, scale
+
+    if (power == 1.0_dp) then
+      norm = value_1 + value_2
+      deriv_1 = 1.0_dp
+      deriv_2 = 1.0_dp
+      return
+    end if
+
+    scale = max(value_1, value_2)
+    if (scale == 0.0_dp) then
+      norm = 0.0_dp
+      deriv_1 = 0.0_dp
+      deriv_2 = 0.0_dp
+      return
+    end if
+
+    ratio_1 = value_1/scale
+    ratio_2 = value_2/scale
+    powered_sum = ratio_1**power + ratio_2**power
+    norm = scale*powered_sum**(1.0_dp/power)
+    common = powered_sum**(1.0_dp/power - 1.0_dp)
+    deriv_1 = ratio_1**(power - 1.0_dp)*common
+    deriv_2 = ratio_2**(power - 1.0_dp)*common
+
+  end subroutine wann_stable_pnorm
+
+  !================================================!
+  subroutine wann_space_energy_objective(space_energy, spatial_spread, u_matrix_loc, &
+                                         eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                         energy_centre, energy_second, energy_spread, spatial_weight, &
+                                         energy_weight, wann_spread, error, comm)
+    !================================================!
+    !! Evaluate the per-WF joint space-energy p-norm and its marginal weights.
+
+    use w90_comms, only: comms_allreduce, w90_comm_type
+    use w90_wannier90_types, only: wann_space_energy_type
+
+    implicit none
+
+    type(wann_space_energy_type), intent(in) :: space_energy
+    type(localisation_vars_type), intent(inout) :: wann_spread
+    type(w90_error_type), allocatable, intent(out) :: error
+    type(w90_comm_type), intent(in) :: comm
+
+    integer, intent(in) :: num_kpts, num_wann, nkrank, global_k(:)
+    real(kind=dp), intent(in) :: spatial_spread(:), eigval_subspace(:, :)
+    real(kind=dp), intent(out) :: energy_centre(:), energy_second(:), energy_spread(:)
+    real(kind=dp), intent(out) :: spatial_weight(:), energy_weight(:)
+    complex(kind=dp), intent(in) :: u_matrix_loc(:, :, :)
+
+    integer :: band, iw, nkp, nkp_loc
+    real(kind=dp) :: deriv_energy, deriv_spatial, energy_component, orbital_objective
+    real(kind=dp) :: spatial_component
+
+    energy_centre = 0.0_dp
+    energy_second = 0.0_dp
+    do nkp_loc = 1, nkrank
+      nkp = global_k(nkp_loc)
+      do iw = 1, num_wann
+        do band = 1, num_wann
+          energy_centre(iw) = energy_centre(iw) + eigval_subspace(band, nkp)* &
+                              abs(u_matrix_loc(band, iw, nkp_loc))**2
+          energy_second(iw) = energy_second(iw) + eigval_subspace(band, nkp)**2* &
+                              abs(u_matrix_loc(band, iw, nkp_loc))**2
+        end do
+      end do
+    end do
+
+    call comms_allreduce(energy_centre(1), num_wann, 'SUM', error, comm)
+    if (allocated(error)) return
+    call comms_allreduce(energy_second(1), num_wann, 'SUM', error, comm)
+    if (allocated(error)) return
+
+    energy_centre = energy_centre/real(num_kpts, dp)
+    energy_second = energy_second/real(num_kpts, dp)
+    energy_spread = max(energy_second - energy_centre**2, 0.0_dp)
+
+    wann_spread%objective = 0.0_dp
+    do iw = 1, num_wann
+      spatial_component = (1.0_dp - space_energy%mixing)*max(spatial_spread(iw), 0.0_dp)
+      energy_component = space_energy%mixing*space_energy%scale*energy_spread(iw)
+      call wann_stable_pnorm(spatial_component, energy_component, space_energy%power, &
+                             orbital_objective, deriv_spatial, deriv_energy)
+      wann_spread%objective = wann_spread%objective + orbital_objective
+      spatial_weight(iw) = (1.0_dp - space_energy%mixing)*deriv_spatial
+      energy_weight(iw) = space_energy%mixing*space_energy%scale*deriv_energy
+    end do
+    wann_spread%energy_variance = sum(energy_spread)
+
+  end subroutine wann_space_energy_objective
+
+  !================================================!
+  subroutine wann_space_energy_gradient(u_matrix_loc, eigval_subspace, energy_centre, &
+                                        energy_weight, num_kpts, num_wann, nkrank, global_k, &
+                                        energy_gradient)
+    !================================================!
+    !! Gradient of sum_n energy_weight(n) Var_n(H).
+    !!
+    !! The H^2 commutator is essential when the p-norm produces unequal
+    !! per-WF weights. It vanishes for p=1, recovering the former additive
+    !! space-energy localization gradient.
+
+    implicit none
+
+    integer, intent(in) :: num_kpts, num_wann, nkrank, global_k(:)
+    real(kind=dp), intent(in) :: eigval_subspace(:, :), energy_centre(:), energy_weight(:)
+    complex(kind=dp), intent(in) :: u_matrix_loc(:, :, :)
+    complex(kind=dp), intent(out) :: energy_gradient(:, :, :)
+
+    integer :: band, m, n, nkp, nkp_loc
+    complex(kind=dp) :: ham(num_wann, num_wann), ham2(num_wann, num_wann)
+    real(kind=dp) :: weighted_mean_m, weighted_mean_n
+
+    energy_gradient = cmplx(0.0_dp, 0.0_dp, kind=dp)
+    do nkp_loc = 1, nkrank
+      nkp = global_k(nkp_loc)
+      ham = cmplx(0.0_dp, 0.0_dp, kind=dp)
+      ham2 = cmplx(0.0_dp, 0.0_dp, kind=dp)
+      do n = 1, num_wann
+        do m = 1, num_wann
+          do band = 1, num_wann
+            ham(m, n) = ham(m, n) + eigval_subspace(band, nkp)* &
+                        conjg(u_matrix_loc(band, m, nkp_loc))*u_matrix_loc(band, n, nkp_loc)
+            ham2(m, n) = ham2(m, n) + eigval_subspace(band, nkp)**2* &
+                         conjg(u_matrix_loc(band, m, nkp_loc))*u_matrix_loc(band, n, nkp_loc)
+          end do
+        end do
+      end do
+
+      do n = 1, num_wann
+        do m = 1, num_wann
+          weighted_mean_m = energy_weight(m)*energy_centre(m)
+          weighted_mean_n = energy_weight(n)*energy_centre(n)
+          energy_gradient(m, n, nkp_loc) = &
+            ((energy_weight(m) - energy_weight(n))*ham2(m, n) &
+             - 2.0_dp*(weighted_mean_m - weighted_mean_n)*ham(m, n))/real(num_kpts, dp)
+        end do
+        energy_gradient(n, n, nkp_loc) = cmplx(0.0_dp, 0.0_dp, kind=dp)
+      end do
+    end do
+
+  end subroutine wann_space_energy_gradient
 
   !================================================!
 
@@ -2395,6 +2629,9 @@ contains
       wann_spread%om_tot = wann_spread%om_i + wann_spread%om_d + wann_spread%om_od
     end if
 
+    wann_spread%energy_variance = 0.0_dp
+    wann_spread%objective = wann_spread%om_tot
+
     if (print_output%timing_level > 1 .and. print_output%iprint > 0) call io_stopwatch_stop('wann: omega', timer)
     return
 
@@ -2404,7 +2641,7 @@ contains
   subroutine wann_domega(csheet, sheet, rave, num_wann, kmesh_info, num_kpts, wann_slwf, use_ss_functional, &
                          lsitesymmetry, ln_tmp_loc, m_matrix_loc, rnkb_loc, cdodq_loc, &
                          lambda_loc, timing_level, sitesym, timer, nkrank, global_k, error, comm, &
-                         iprint, cdodq)
+                         iprint, cdodq, orbital_weight)
     !================================================!
     !
     !   Calculate the Gradient of the Wannier Function spread
@@ -2443,6 +2680,7 @@ contains
     real(kind=dp), intent(inout) :: ln_tmp_loc(:, :, :)
     real(kind=dp), intent(inout) :: rnkb_loc(:, :, :)
     real(kind=dp), intent(in) :: lambda_loc
+    real(kind=dp), intent(in), optional :: orbital_weight(:)
 
     ! as we work on the local cdodq, returning the full cdodq array is now made optional
     complex(kind=dp), intent(out), optional :: cdodq(:, :, :)
@@ -2458,6 +2696,7 @@ contains
     real(kind=dp), allocatable :: r0kb(:, :, :)
     complex(kind=dp), allocatable :: sum_mnn(:, :)
     integer :: iw, ind, nkp, nn, m, n, ierr, nkp_loc, cnn, cnn2
+    real(kind=dp) :: weight_m, weight_n
     complex(kind=dp) :: mnn
     integer :: my_node_id
 
@@ -2723,18 +2962,24 @@ contains
           else
             do n = 1, num_wann
               do m = 1, num_wann
+                weight_n = 1.0_dp
+                weight_m = 1.0_dp
+                if (present(orbital_weight)) then
+                  weight_n = orbital_weight(n)
+                  weight_m = orbital_weight(m)
+                end if
                 ! A[R^{k,b}]=(R-Rdag)/2
                 cdodq_loc(m, n, nkp_loc) = cdodq_loc(m, n, nkp_loc) &
                                            + kmesh_info%wb(nn)*0.5_dp &
-                                           *(cr(m, n) - conjg(cr(n, m)))
+                                           *(weight_n*cr(m, n) - weight_m*conjg(cr(n, m)))
                 ! -S[T^{k,b}]=-(T+Tdag)/2i ; T_mn = Rt_mn q_n
                 cdodq_loc(m, n, nkp_loc) = cdodq_loc(m, n, nkp_loc) - &
-                                           (crt(m, n)*ln_tmp_loc(n, nn, nkp_loc) &
-                                            + conjg(crt(n, m)*ln_tmp_loc(m, nn, nkp_loc))) &
+                                           (weight_n*crt(m, n)*ln_tmp_loc(n, nn, nkp_loc) &
+                                            + weight_m*conjg(crt(n, m)*ln_tmp_loc(m, nn, nkp_loc))) &
                                            *cmplx(0.0_dp, -0.5_dp, kind=dp)
                 cdodq_loc(m, n, nkp_loc) = cdodq_loc(m, n, nkp_loc) - kmesh_info%wb(nn) &
-                                           *(crt(m, n)*rnkb_loc(n, nn, nkp_loc) &
-                                             + conjg(crt(n, m)*rnkb_loc(m, nn, nkp_loc))) &
+                                           *(weight_n*crt(m, n)*rnkb_loc(n, nn, nkp_loc) &
+                                             + weight_m*conjg(crt(n, m)*rnkb_loc(m, nn, nkp_loc))) &
                                            *cmplx(0.0_dp, -0.5_dp, kind=dp)
               end do
             end do
@@ -2799,6 +3044,8 @@ contains
     copy%om_tot = orig%om_tot
     copy%om_iod = orig%om_iod
     copy%om_nu = orig%om_nu
+    copy%energy_variance = orig%energy_variance
+    copy%objective = orig%objective
 
     return
 
@@ -3627,6 +3874,8 @@ contains
     end if
 
     wann_spread%om_tot = wann_spread%om_i + wann_spread%om_d + wann_spread%om_od
+    wann_spread%energy_variance = 0.0_dp
+    wann_spread%objective = wann_spread%om_tot
 
     deallocate (m_w_nn2, stat=ierr)
     if (ierr /= 0) then

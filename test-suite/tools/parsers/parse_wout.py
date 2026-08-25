@@ -36,6 +36,12 @@ omegaIOD_C_re = re.compile(r"Omega\ IOD_C\s+=\s*([0-9\.-]+)\s*$")
 omegaRest_re = re.compile(r"Omega\ Rest\s+=\s*([0-9\.-]+)\s*$")
 penaltyfunc_re = re.compile(r"Penalty\ func\s+=\s*([0-9\.-]+)\s*$")
 omegaTotal_C_re = re.compile(r"Omega\ Total_C\s+=\s*([0-9\.-]+)\s*$")
+space_energy_objective_re = re.compile(
+    r"Final space-energy objective\s+=\s*([0-9eE+\.-]+)\s*$"
+)
+energy_variance_re = re.compile(
+    r"Final total energy variance \(eV\^2\)\s+=\s*([0-9eE+\.-]+)\s*$"
+)
 
 ## A comment on regexps: re.match only checks the beginning of the line, while
 ## re.search anywhere in the string (like perl)
@@ -150,6 +156,14 @@ def parse(fname):
         match = omegaTotal_C_re.search(l)
         if match:
             retdict["omegaTotal_C"].append(float(match.groups()[0]))
+            continue
+        match = space_energy_objective_re.search(l)
+        if match:
+            retdict["space_energy_objective"].append(float(match.groups()[0]))
+            continue
+        match = energy_variance_re.search(l)
+        if match:
+            retdict["energy_variance"].append(float(match.groups()[0]))
             continue
         ###############################################################
 

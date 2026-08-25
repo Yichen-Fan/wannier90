@@ -181,6 +181,20 @@ module w90_wannier90_types
     real(kind=dp), allocatable :: centres(:, :)
   end type guiding_centres_type
 
+  type wann_space_energy_type
+    !!==================================================
+    !! Controls the joint real-space and energy-variance localization functional.
+    !!==================================================
+    logical :: enabled = .false.
+    !! Derived from a nonzero sp_en_mix in the input.
+    real(kind=dp) :: mixing = 0.0_dp
+    !! Relative energy-localization weight, gamma, in [0, 1].
+    real(kind=dp) :: scale = 1.0_dp
+    !! Energy-variance scale C in Angstrom^2/eV^2.
+    real(kind=dp) :: power = 1.0_dp
+    !! Power p of the per-Wannier-function p-norm; p >= 1.
+  end type wann_space_energy_type
+
   type wann_control_type ! only in wannierise.F90
     !!==================================================
     !! Contains parameters that control the wannierisation minimisation procedure
@@ -204,6 +218,7 @@ module w90_wannier90_types
     real(kind=dp) :: conv_noise_amp = -1.0_dp
     integer :: conv_noise_num = 3
     type(wann_slwf_type) :: constrain
+    type(wann_space_energy_type) :: space_energy
   end type wann_control_type
 
   type wann_omega_type

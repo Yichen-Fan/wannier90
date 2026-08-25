@@ -126,6 +126,11 @@ foreach (extra_file IN ITEMS
 	file(COPY ${extra_file} DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 endforeach ()
 
+add_test(NAME test_space_energy_localizer_math
+		COMMAND Python::Interpreter ${CMAKE_CURRENT_BINARY_DIR}/tools/test_space_energy_localizer.py
+)
+set_tests_properties(test_space_energy_localizer_math PROPERTIES LABELS unit)
+
 ## Add unit tests
 add_subdirectory(tests)
 

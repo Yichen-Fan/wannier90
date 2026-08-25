@@ -577,6 +577,36 @@
     <required>False</required>
   </parameter>
   <parameter tool="w90">
+    <name>sp_en_mix</name>
+    <type>R</type>
+    <description>Mixing parameter $\\gamma$ for joint real-space and energy-variance localization</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>0.0</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_scale</name>
+    <type units="Ang*Ang/eV/eV">R</type>
+    <description>Energy-variance scale $C$ for joint space-energy localization</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1.0</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_power</name>
+    <type>R</type>
+    <description>Power $p$ of the per-Wannier-function space-energy p-norm</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1.0</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
     <name>conv_noise_amp</name>
     <type>R</type>
     <description>The amplitude of random noise applied towards end of minimisation procedure</description>

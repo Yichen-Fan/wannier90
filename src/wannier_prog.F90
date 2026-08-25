@@ -292,6 +292,7 @@ program wannier
   need_eigvals = (need_eigvals .or. common_data%output_file%write_hr)
   need_eigvals = (need_eigvals .or. common_data%output_file%write_tb)
   need_eigvals = (need_eigvals .or. ldsnt) ! disentanglement anyway requires evals
+  need_eigvals = (need_eigvals .or. common_data%wann_control%space_energy%enabled)
 
   if (need_eigvals) then
     allocate (eigval(nb, nk), stat=ierr)

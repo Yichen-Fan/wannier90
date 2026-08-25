@@ -43,11 +43,58 @@ module w90_hamiltonian
 
   public :: hamiltonian_dealloc
   public :: hamiltonian_get_hr
+  public :: hamiltonian_get_subspace_eigenvalues
   public :: hamiltonian_setup
   public :: hamiltonian_write_hr
   public :: hamiltonian_write_tb
 
 contains
+
+  !================================================!
+  subroutine hamiltonian_get_subspace_eigenvalues(dis_manifold, eigval, eigval_subspace, &
+                                                   num_kpts, num_wann, have_disentangled, &
+                                                   u_matrix_opt)
+    !================================================!
+    !! Return the eigenvalues of the smooth num_wann-dimensional subspace.
+    !!
+    !! For an isolated manifold these are the first num_wann input eigenvalues.
+    !! After disentanglement, u_matrix_opt is chosen to diagonalize the projected
+    !! Hamiltonian, so its diagonal expectation values are the subspace energies.
+
+    use w90_types, only: dis_manifold_type
+
+    implicit none
+
+    type(dis_manifold_type), intent(in) :: dis_manifold
+    integer, intent(in) :: num_kpts, num_wann
+    real(kind=dp), intent(in) :: eigval(:, :)
+    real(kind=dp), intent(out) :: eigval_subspace(:, :)
+    logical, intent(in) :: have_disentangled
+    complex(kind=dp), intent(in), optional :: u_matrix_opt(:, :, :)
+
+    integer :: band, counter, iw, loop_kpt
+
+    eigval_subspace = 0.0_dp
+    if (.not. have_disentangled) then
+      eigval_subspace(1:num_wann, 1:num_kpts) = eigval(1:num_wann, 1:num_kpts)
+      return
+    end if
+
+    do loop_kpt = 1, num_kpts
+      counter = 0
+      do band = 1, size(eigval, 1)
+        if (dis_manifold%lwindow(band, loop_kpt)) then
+          counter = counter + 1
+          do iw = 1, num_wann
+            eigval_subspace(iw, loop_kpt) = eigval_subspace(iw, loop_kpt) + &
+              eigval(band, loop_kpt)*real(conjg(u_matrix_opt(counter, iw, loop_kpt))* &
+                                           u_matrix_opt(counter, iw, loop_kpt), dp)
+          end do
+        end if
+      end do
+    end do
+
+  end subroutine hamiltonian_get_subspace_eigenvalues
 
   !================================================!
 

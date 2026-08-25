@@ -626,7 +626,7 @@ contains
 
     ! local variables
     integer :: ierr
-    logical :: found
+    logical :: found, found_sp_en_mix
 
     call w90_readwrite_get_keyword(settings, 'num_dump_cycles', found, error, comm, &
                                    i_value=wann_control%num_dump_cycles)
@@ -741,6 +741,32 @@ contains
     call w90_readwrite_get_keyword(settings, 'precond', found, error, comm, &
                                    l_value=wann_control%precond)
     if (allocated(error)) return
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_mix', found_sp_en_mix, error, comm, &
+                                   r_value=wann_control%space_energy%mixing)
+    if (allocated(error)) return
+    if (found_sp_en_mix .and. (wann_control%space_energy%mixing < 0.0_dp .or. &
+                              wann_control%space_energy%mixing > 1.0_dp)) then
+      call set_error_input(error, 'Error: sp_en_mix must lie in [0, 1]', comm)
+      return
+    end if
+    wann_control%space_energy%enabled = found_sp_en_mix .and. wann_control%space_energy%mixing /= 0.0_dp
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_scale', found, error, comm, &
+                                   r_value=wann_control%space_energy%scale)
+    if (allocated(error)) return
+    if (wann_control%space_energy%scale < 0.0_dp) then
+      call set_error_input(error, 'Error: sp_en_scale must be non-negative', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_power', found, error, comm, &
+                                   r_value=wann_control%space_energy%power)
+    if (allocated(error)) return
+    if (wann_control%space_energy%power < 1.0_dp) then
+      call set_error_input(error, 'Error: sp_en_power must be at least one', comm)
+      return
+    end if
 
     wann_control%constrain%slwf_num = num_wann
     call w90_readwrite_get_keyword(settings, 'slwf_num', found, error, comm, &
@@ -2071,6 +2097,18 @@ contains
         wann_control%guiding_centres%enable, '|'
       write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Use phases for initial projections        :', &
         use_bloch_phases, '|'
+      if (wann_control%space_energy%enabled .or. print_output%iprint > 2) then
+        write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Use space-energy localization             :', &
+          wann_control%space_energy%enabled, '|'
+      end if
+      if (wann_control%space_energy%enabled) then
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Space-energy mixing gamma                 :', &
+          wann_control%space_energy%mixing, '|'
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Energy variance scale C (Ang^2/eV^2)      :', &
+          wann_control%space_energy%scale, '|'
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Space-energy p-norm power                 :', &
+          wann_control%space_energy%power, '|'
+      end if
       if (wann_control%guiding_centres%enable .or. print_output%iprint > 2) then
         write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  Iterations before starting guiding centres:', &
           wann_control%guiding_centres%num_no_guide_iter, '|'
