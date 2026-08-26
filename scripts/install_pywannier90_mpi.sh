@@ -253,6 +253,8 @@ echo "Activate in the current shell with:"
 echo "  source \"$activation_file\""
 echo "Run a standalone calculation with, for example:"
 echo "  mpiexec -n 4 \"$installed_executable\" seedname"
-echo "Run an MPI PySCF/pyWannier90 calculation with, for example:"
-echo "  mpiexec -n 4 \"$python_command\" your_calculation.py"
+if $install_python || $run_tests; then
+    echo "Run the bundled MPI PySCF/DLWF example with:"
+    echo "  mpiexec -n 4 \"$python_command\" \"$repository_root/pyWannier90/examples/PySCF/h2_v4.py\""
+fi
 echo "Keep the MPI/compiler module stack used for the build loaded at runtime."
