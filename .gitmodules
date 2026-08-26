@@ -1,0 +1,4 @@
+[submodule "pyWannier90"]
+	path = pyWannier90
+	url = git@github.com:Yichen-Fan/pyWannier90.git
+	branch = w90-v4-dlwf
