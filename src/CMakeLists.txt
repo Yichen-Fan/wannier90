@@ -87,6 +87,9 @@ if (WANNIER90_MPI)
 	endif ()
 
 	target_link_libraries(Wannier90_lib PUBLIC MPI::MPI_Fortran)
+	if (WANNIER90_WITH_C)
+		target_link_libraries(Wannier90_lib PRIVATE MPI::MPI_C)
+	endif ()
 	target_compile_definitions(Wannier90_lib PRIVATE
 			# TODO: Use mpi_f08 instead. Tests are not adapted yet
 			MPI ${_wannier90_mpi_interface}

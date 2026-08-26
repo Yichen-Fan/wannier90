@@ -204,13 +204,18 @@ contains
 
   subroutine w90_set_m_local(w90_obj, m_cptr) bind(c)
     ! copy a pointer to m-matrix data
+    use w90_comms, only: mpirank
     implicit none
     type(w90_data), value :: w90_obj
     type(c_ptr), value :: m_cptr
     complex(kind=c_double_complex), pointer :: fptr(:, :, :, :)
     type(lib_common_type), pointer :: w90_fptr
+    integer :: num_kpts_local
     call c_f_pointer(w90_obj%caddr, w90_fptr)
-    call c_f_pointer(m_cptr, fptr, [w90_fptr%num_bands, w90_fptr%num_bands, w90_fptr%kmesh_info%nntot, w90_fptr%num_kpts])
+    num_kpts_local = count(w90_fptr%dist_kpoints == mpirank(w90_fptr%comm))
+    call c_f_pointer(m_cptr, fptr, &
+                     [w90_fptr%num_bands, w90_fptr%num_bands, &
+                      w90_fptr%kmesh_info%nntot, num_kpts_local])
     call w90_set_m_local_f(w90_fptr, fptr)
   end subroutine
 

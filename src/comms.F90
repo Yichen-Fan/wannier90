@@ -36,6 +36,7 @@ module w90_comms
 
   use w90_constants, only: dp
   use w90_error_base
+  use iso_c_binding, only: c_f_pointer, c_loc
 
 #ifdef MPI
 #  if !(defined(MPI08) || defined(MPI90) || defined(MPIH))
@@ -278,11 +279,12 @@ contains
     implicit none
     type(w90_comm_type), intent(in) :: comm
     type(w90_error_type), allocatable, intent(inout) :: error
-    integer :: ierr, mpiierr, abserr
+    integer :: ierr, mpiierr, abserr, totalerr
 
 #if defined(MPI) && !defined(DISABLE_ERROR_SYNC)
     abserr = abs(ierr) ! possibility of -ve values, use abs for safety
-    call mpi_allreduce(MPI_IN_PLACE, abserr, 1, MPI_INTEGER, MPI_SUM, comm%comm, mpiierr)
+    call mpi_allreduce(abserr, totalerr, 1, MPI_INTEGER, MPI_SUM, comm%comm, mpiierr)
+    abserr = totalerr
     ! you could check mpiierr here, but truly all bets are off in that case
     if (abserr > 0 .and. ierr == 0) call recv_error(error)
 #endif
@@ -698,7 +700,7 @@ contains
     !! Reduce integer data to root node
     implicit none
 
-    integer, intent(inout) :: array
+    integer, intent(inout), target :: array
     integer, intent(in) :: size
     character(len=*), intent(in) :: op
     type(w90_comm_type), intent(in) :: comm
@@ -707,41 +709,38 @@ contains
 #ifdef MPI
     integer :: ierr
     integer :: rank
-    rank = mpirank(comm)
+    integer, allocatable :: reduced(:)
+    integer, pointer :: array_view(:)
 
-    ! note, JJ 23/2/2021
-    ! previously this routine alloc'd/used/dealloc'd a temp array
-    ! to be used as receive buffer for MPI_reduce
-    ! this temp array was then copied to argument "array"
-    ! but: "array" needs to be of scalar type for the polymorphism to work
-    ! so: need to copy array into a (fake) scalar
-    ! previously: a subroutine my_icopy was used to help to do this.
-    ! probably just reducing in place is better?
+    if (size == 0) return
+    ! Keep send and receive buffers distinct.  MPI_IN_PLACE from the Fortran
+    ! bindings is not reliable when this library is entered from mpi4py.
+    allocate (reduced(size), stat=ierr)
+    if (ierr /= 0) then
+      call set_base_error(error, 'Error allocating buffer in comms_reduce_int', code_mpi)
+      return
+    end if
+    call c_f_pointer(c_loc(array), array_view, [size])
+    rank = mpirank(comm)
 
     select case (op)
     case ('SUM')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_INTEGER, MPI_SUM, root_id, comm%comm, &
-                        ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_INTEGER, MPI_SUM, root_id, comm%comm, ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_INTEGER, MPI_SUM, root_id, comm%comm, ierr)
     case ('PRD')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_INTEGER, MPI_PROD, root_id, comm%comm, &
-                        ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_INTEGER, MPI_PROD, root_id, comm%comm, ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_INTEGER, MPI_PROD, root_id, comm%comm, ierr)
     case default
       call set_base_error(error, 'Unknown operation in comms_reduce_int', code_mpi)
+      deallocate (reduced)
       return
     end select
 
     if (ierr .ne. MPI_SUCCESS) then
       call set_base_error(error, 'Error in comms_reduce_int', code_mpi)
+      deallocate (reduced)
       return
     end if
+    if (rank == root_id) array_view = reduced
+    deallocate (reduced)
 #endif
 
   end subroutine comms_no_sync_reduce_int
@@ -751,7 +750,7 @@ contains
 
     implicit none
 
-    real(kind=dp), intent(inout) :: array
+    real(kind=dp), intent(inout), target :: array
     integer, intent(in) :: size
     character(len=*), intent(in) :: op
     type(w90_comm_type), intent(in) :: comm
@@ -760,52 +759,46 @@ contains
 #ifdef MPI
     integer :: ierr
     integer :: rank
+    real(kind=dp), allocatable :: reduced(:)
+    real(kind=dp), pointer :: array_view(:)
+
+    if (size == 0) return
+    allocate (reduced(size), stat=ierr)
+    if (ierr /= 0) then
+      call set_base_error(error, 'Error allocating buffer in comms_reduce_real', code_mpi)
+      return
+    end if
+    call c_f_pointer(c_loc(array), array_view, [size])
     rank = mpirank(comm)
 
     select case (op)
 
     case ('SUM')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_SUM, root_id, &
-                        comm%comm, ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_DOUBLE_PRECISION, MPI_SUM, root_id, comm%comm, &
-                        ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_SUM, root_id, &
+                      comm%comm, ierr)
     case ('PRD')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_PROD, root_id, &
-                        comm%comm, ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_DOUBLE_PRECISION, MPI_PROD, root_id, comm%comm, &
-                        ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_PROD, root_id, &
+                      comm%comm, ierr)
     case ('MIN')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_MIN, root_id, &
-                        comm%comm, ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_DOUBLE_PRECISION, MPI_MIN, root_id, comm%comm, &
-                        ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_MIN, root_id, &
+                      comm%comm, ierr)
     case ('MAX')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_MAX, root_id, &
-                        comm%comm, ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_DOUBLE_PRECISION, MPI_MAX, root_id, comm%comm, &
-                        ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_MAX, root_id, &
+                      comm%comm, ierr)
     case default
       call set_base_error(error, 'Unknown operation in comms_reduce_real', code_mpi)
+      deallocate (reduced)
       return
 
     end select
 
     if (ierr .ne. MPI_SUCCESS) then
       call set_base_error(error, 'Error in comms_reduce_real', code_mpi)
+      deallocate (reduced)
       return
     end if
+    if (rank == root_id) array_view = reduced
+    deallocate (reduced)
 #endif
 
   end subroutine comms_no_sync_reduce_real
@@ -815,7 +808,7 @@ contains
 
     implicit none
 
-    complex(kind=dp), intent(inout) :: array
+    complex(kind=dp), intent(inout), target :: array
     integer, intent(in) :: size
     character(len=*), intent(in) :: op
     type(w90_comm_type), intent(in) :: comm
@@ -824,36 +817,40 @@ contains
 #ifdef MPI
     integer :: ierr
     integer :: rank
+    complex(kind=dp), allocatable :: reduced(:)
+    complex(kind=dp), pointer :: array_view(:)
+
+    if (size == 0) return
+    allocate (reduced(size), stat=ierr)
+    if (ierr /= 0) then
+      call set_base_error(error, 'Error allocating buffer in comms_reduce_cmplx', code_mpi)
+      return
+    end if
+    call c_f_pointer(c_loc(array), array_view, [size])
     rank = mpirank(comm)
 
     select case (op)
 
     case ('SUM')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_COMPLEX, MPI_SUM, root_id, &
-                        comm%comm, ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_DOUBLE_COMPLEX, MPI_SUM, root_id, comm%comm, &
-                        ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_DOUBLE_COMPLEX, MPI_SUM, root_id, &
+                      comm%comm, ierr)
     case ('PRD')
-      if (rank == root_id) then
-        call mpi_reduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_COMPLEX, MPI_PROD, root_id, &
-                        comm%comm, ierr)
-      else
-        call mpi_reduce(array, array, size, MPI_DOUBLE_COMPLEX, MPI_PROD, root_id, comm%comm, &
-                        ierr)
-      end if
+      call mpi_reduce(array_view, reduced, size, MPI_DOUBLE_COMPLEX, MPI_PROD, root_id, &
+                      comm%comm, ierr)
     case default
       call set_base_error(error, 'Unknown operation in comms_reduce_cmplx', code_mpi)
+      deallocate (reduced)
       return
 
     end select
 
     if (ierr .ne. MPI_SUCCESS) then
       call set_base_error(error, 'Error in comms_reduce_cmplx', code_mpi)
+      deallocate (reduced)
       return
     end if
+    if (rank == root_id) array_view = reduced
+    deallocate (reduced)
 
 #endif
 
@@ -864,7 +861,7 @@ contains
 
     implicit none
 
-    real(kind=dp), intent(inout) :: array
+    real(kind=dp), intent(inout), target :: array
     integer, intent(in) :: size
     character(len=*), intent(in) :: op
     type(w90_comm_type), intent(in) :: comm
@@ -872,31 +869,41 @@ contains
 
 #ifdef MPI
     integer :: ierr
+    real(kind=dp), allocatable :: reduced(:)
+    real(kind=dp), pointer :: array_view(:)
+
+    if (size == 0) return
+    allocate (reduced(size), stat=ierr)
+    if (ierr /= 0) then
+      call set_base_error(error, 'Error allocating buffer in comms_allreduce_real', code_mpi)
+      return
+    end if
+    call c_f_pointer(c_loc(array), array_view, [size])
 
     select case (op)
 
     case ('SUM')
-      call mpi_allreduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_SUM, comm%comm, &
-                         ierr)
+      call mpi_allreduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_SUM, comm%comm, ierr)
     case ('PRD')
-      call mpi_allreduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_PROD, comm%comm, &
-                         ierr)
+      call mpi_allreduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_PROD, comm%comm, ierr)
     case ('MIN')
-      call mpi_allreduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_MIN, comm%comm, &
-                         ierr)
+      call mpi_allreduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_MIN, comm%comm, ierr)
     case ('MAX')
-      call mpi_allreduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_PRECISION, MPI_MAX, comm%comm, &
-                         ierr)
+      call mpi_allreduce(array_view, reduced, size, MPI_DOUBLE_PRECISION, MPI_MAX, comm%comm, ierr)
     case default
       call set_base_error(error, 'Unknown operation in comms_allreduce_real', code_mpi)
+      deallocate (reduced)
       return
 
     end select
 
     if (ierr .ne. MPI_SUCCESS) then
       call set_base_error(error, 'Error in comms_allreduce_real', code_mpi)
+      deallocate (reduced)
       return
     end if
+    array_view = reduced
+    deallocate (reduced)
 #endif
 
   end subroutine comms_no_sync_allreduce_real
@@ -905,7 +912,7 @@ contains
     !! Reduce complex data to all nodes
     implicit none
 
-    complex(kind=dp), intent(inout) :: array
+    complex(kind=dp), intent(inout), target :: array
     integer, intent(in) :: size
     character(len=*), intent(in) :: op
     type(w90_comm_type), intent(in) :: comm
@@ -913,25 +920,37 @@ contains
 
 #ifdef MPI
     integer :: ierr
+    complex(kind=dp), allocatable :: reduced(:)
+    complex(kind=dp), pointer :: array_view(:)
+
+    if (size == 0) return
+    allocate (reduced(size), stat=ierr)
+    if (ierr /= 0) then
+      call set_base_error(error, 'Error allocating buffer in comms_allreduce_cmplx', code_mpi)
+      return
+    end if
+    call c_f_pointer(c_loc(array), array_view, [size])
 
     select case (op)
 
     case ('SUM')
-      call mpi_allreduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_COMPLEX, MPI_SUM, comm%comm, &
-                         ierr)
+      call mpi_allreduce(array_view, reduced, size, MPI_DOUBLE_COMPLEX, MPI_SUM, comm%comm, ierr)
     case ('PRD')
-      call mpi_allreduce(MPI_IN_PLACE, array, size, MPI_DOUBLE_COMPLEX, MPI_PROD, comm%comm, &
-                         ierr)
+      call mpi_allreduce(array_view, reduced, size, MPI_DOUBLE_COMPLEX, MPI_PROD, comm%comm, ierr)
     case default
       call set_base_error(error, 'Unknown operation in comms_allreduce_cmplx', code_mpi)
+      deallocate (reduced)
       return
 
     end select
 
     if (ierr .ne. MPI_SUCCESS) then
       call set_base_error(error, 'Error in comms_allreduce_cmplx', code_mpi)
+      deallocate (reduced)
       return
     end if
+    array_view = reduced
+    deallocate (reduced)
 #endif
 
   end subroutine comms_no_sync_allreduce_cmplx
