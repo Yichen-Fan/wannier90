@@ -84,6 +84,7 @@ module w90_library
 
   private :: dp ! avoid polluting calling program's namespace (dp is defined in w90_constants)
   private :: prterr
+  private :: w90_ensure_sitesym_data
 
   ! datatype encapsulating types used by wannier90
   type lib_common_type
@@ -532,6 +533,24 @@ contains
     if (allocated(common_data%settings%in_data)) deallocate (common_data%settings%in_data)
   end subroutine w90_input_reader
 
+  subroutine w90_ensure_sitesym_data(common_data, error)
+    !! Lazily load .dmn data for every library entry point that consumes it.
+
+    use w90_error_base, only: w90_error_type
+    use w90_sitesym, only: sitesym_read
+
+    implicit none
+
+    type(lib_common_type), intent(inout) :: common_data
+    type(w90_error_type), allocatable, intent(out) :: error
+
+    if (common_data%lsitesymmetry .and. .not. allocated(common_data%sitesym%ik2ir)) then
+      call sitesym_read(common_data%sitesym, common_data%num_bands, common_data%num_kpts, &
+                        common_data%num_wann, common_data%seedname, error, common_data%comm)
+    end if
+
+  end subroutine w90_ensure_sitesym_data
+
   subroutine w90_disentangle(common_data, istdout, istderr, ierr)
     !! perform disentanglement; assumes library data object is already setup after w90_input_setopt() call
     !! no effect if number of bands == number of WF
@@ -540,7 +559,6 @@ contains
     use w90_error_base, only: w90_error_type
     use w90_error, only: set_error_fatal
     use w90_overlap, only: overlap_write
-
     implicit none
 
     ! arguments
@@ -552,6 +570,12 @@ contains
     type(w90_error_type), allocatable :: error
 
     ierr = 0
+
+    call w90_ensure_sitesym_data(common_data, error)
+    if (allocated(error)) then
+      call prterr(error, ierr, istdout, istderr, common_data%comm)
+      return
+    end if
 
     ! m_matrix_orig_local (nband*nwann for disentangle)
     if (.not. associated(common_data%m_matrix_local)) then ! (nband*nwann*nknode for wannierise)
@@ -638,6 +662,12 @@ contains
 
     ierr = 0
 
+    call w90_ensure_sitesym_data(common_data, error)
+    if (allocated(error)) then
+      call prterr(error, ierr, istdout, istderr, common_data%comm)
+      return
+    end if
+
     if (.not. associated(common_data%m_matrix_local)) then
       call set_error_fatal(error, 'm_matrix_local not set for w90_project_overlap call', common_data%comm)
       call prterr(error, ierr, istdout, istderr, common_data%comm)
@@ -703,7 +733,8 @@ contains
     use w90_error_base, only: w90_error_type
     use w90_error, only: set_error_fatal
     use w90_hamiltonian, only: hamiltonian_get_occupation_projector, &
-                               hamiltonian_get_subspace_eigenvalues
+                               hamiltonian_get_subspace_moments
+    use w90_sitesym, only: sitesym_symmetrize_matrix
     use w90_wannierise_mod, only: wann_main, wann_main_gamma
 
     implicit none
@@ -715,10 +746,17 @@ contains
 
     ! local variables
     type(w90_error_type), allocatable :: error
-    real(kind=dp), allocatable :: eigval_subspace(:, :)
+    complex(kind=dp), allocatable :: hamiltonian_subspace(:, :, :)
+    complex(kind=dp), allocatable :: hamiltonian2_subspace(:, :, :)
     complex(kind=dp), allocatable :: occupation_projector(:, :, :)
 
     ierr = 0
+
+    call w90_ensure_sitesym_data(common_data, error)
+    if (allocated(error)) then
+      call prterr(error, ierr, istdout, istderr, common_data%comm)
+      return
+    end if
 
     if (.not. associated(common_data%m_matrix_local)) then
       call set_error_fatal(error, 'Error: m_matrix_local not set for call to w90_wannierise()', common_data%comm)
@@ -729,9 +767,6 @@ contains
     if (.not. allocated(error) .and. common_data%wann_control%space_energy%enabled) then
       if (common_data%gamma_only) then
         call set_error_fatal(error, 'Error: space-energy localization does not yet support gamma_only', &
-                             common_data%comm)
-      else if (common_data%lsitesymmetry) then
-        call set_error_fatal(error, 'Error: space-energy localization does not yet support site_symmetry', &
                              common_data%comm)
       else if (common_data%wann_control%constrain%selective_loc) then
         call set_error_fatal(error, 'Error: space-energy localization does not yet support selective localization', &
@@ -757,22 +792,40 @@ contains
     end if
 
     if (common_data%wann_control%space_energy%enabled) then
-      allocate (eigval_subspace(common_data%num_wann, common_data%num_kpts), stat=ierr)
+      allocate (hamiltonian_subspace(common_data%num_wann, common_data%num_wann, &
+                                     common_data%num_kpts), &
+                hamiltonian2_subspace(common_data%num_wann, common_data%num_wann, &
+                                      common_data%num_kpts), stat=ierr)
       if (ierr /= 0) then
-        call set_error_fatal(error, 'Error allocating subspace eigenvalues for space-energy localization', &
+        call set_error_fatal(error, 'Error allocating subspace Hamiltonian moments for space-energy localization', &
                              common_data%comm)
         call prterr(error, ierr, istdout, istderr, common_data%comm)
         return
       end if
       if (common_data%have_disentangled) then
-        call hamiltonian_get_subspace_eigenvalues(common_data%dis_manifold, common_data%eigval, &
-                                                  eigval_subspace, common_data%num_kpts, &
-                                                  common_data%num_wann, common_data%have_disentangled, &
-                                                  common_data%u_matrix_opt)
+        call hamiltonian_get_subspace_moments(common_data%dis_manifold, common_data%eigval, &
+                                              hamiltonian_subspace, hamiltonian2_subspace, &
+                                              common_data%num_kpts, common_data%num_wann, &
+                                              common_data%have_disentangled, common_data%u_matrix_opt)
       else
-        call hamiltonian_get_subspace_eigenvalues(common_data%dis_manifold, common_data%eigval, &
-                                                  eigval_subspace, common_data%num_kpts, &
-                                                  common_data%num_wann, common_data%have_disentangled)
+        call hamiltonian_get_subspace_moments(common_data%dis_manifold, common_data%eigval, &
+                                              hamiltonian_subspace, hamiltonian2_subspace, &
+                                              common_data%num_kpts, common_data%num_wann, &
+                                              common_data%have_disentangled)
+      end if
+      if (common_data%lsitesymmetry) then
+        call sitesym_symmetrize_matrix(common_data%sitesym, hamiltonian_subspace, &
+                                       common_data%num_kpts, common_data%num_wann, &
+                                       error, common_data%comm)
+        if (.not. allocated(error)) then
+          call sitesym_symmetrize_matrix(common_data%sitesym, hamiltonian2_subspace, &
+                                         common_data%num_kpts, common_data%num_wann, &
+                                         error, common_data%comm)
+        end if
+        if (allocated(error)) then
+          call prterr(error, ierr, istdout, istderr, common_data%comm)
+          return
+        end if
       end if
 
       if (common_data%wann_control%space_energy%write_info) then
@@ -828,8 +881,8 @@ contains
                          common_data%num_kpts, common_data%num_proj, common_data%num_wann, &
                          common_data%optimisation, common_data%rpt_origin, common_data%band_plot%mode, &
                          common_data%tran%mode, common_data%lsitesymmetry, istdout, common_data%timer, &
-                         common_data%dist_kpoints, error, common_data%comm, eigval_subspace, &
-                         occupation_projector, common_data%seedname)
+                         common_data%dist_kpoints, error, common_data%comm, hamiltonian_subspace, &
+                         hamiltonian2_subspace, occupation_projector, common_data%seedname)
         else
           call wann_main(common_data%ham_logical, common_data%kmesh_info, common_data%kpt_latt, &
                          common_data%wann_control, common_data%omega, common_data%sitesym, &
@@ -841,7 +894,8 @@ contains
                          common_data%num_kpts, common_data%num_proj, common_data%num_wann, &
                          common_data%optimisation, common_data%rpt_origin, common_data%band_plot%mode, &
                          common_data%tran%mode, common_data%lsitesymmetry, istdout, common_data%timer, &
-                         common_data%dist_kpoints, error, common_data%comm, eigval_subspace)
+                         common_data%dist_kpoints, error, common_data%comm, hamiltonian_subspace, &
+                         hamiltonian2_subspace)
         end if
       else
         call wann_main(common_data%ham_logical, common_data%kmesh_info, common_data%kpt_latt, &

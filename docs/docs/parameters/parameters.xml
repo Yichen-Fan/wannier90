@@ -657,6 +657,46 @@
     <required>False</required>
   </parameter>
   <parameter tool="w90">
+    <name>sp_en_grad_check</name>
+    <type>L</type>
+    <description>Check the complete space-energy objective gradient by finite differences</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>False</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_grad_check_step</name>
+    <type>R</type>
+    <description>Tangent-space displacement used by the space-energy gradient check</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1.0e-4</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_grad_check_tol</name>
+    <type>R</type>
+    <description>Mixed absolute/relative tolerance for the space-energy gradient check</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1.0e-5</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>sp_en_grad_tol</name>
+    <type units="Ang*Ang">R</type>
+    <description>Mesh-normalized space-energy gradient RMS required for convergence</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>0.0</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
     <name>write_info</name>
     <type>L</type>
     <description>Write final per-Wannier-function space-energy diagnostics to seedname.info</description>

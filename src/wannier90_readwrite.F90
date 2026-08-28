@@ -810,6 +810,57 @@ contains
       return
     end if
 
+    call w90_readwrite_get_keyword(settings, 'sp_en_grad_check', found, error, comm, &
+                                   l_value=wann_control%space_energy%gradient_check)
+    if (allocated(error)) return
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_grad_check_step', found, error, comm, &
+                                   r_value=wann_control%space_energy%gradient_check_step)
+    if (allocated(error)) return
+    if (wann_control%space_energy%gradient_check_step <= 0.0_dp) then
+      call set_error_input(error, 'Error: sp_en_grad_check_step must be positive', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_grad_check_tol', found, error, comm, &
+                                   r_value=wann_control%space_energy%gradient_check_tolerance)
+    if (allocated(error)) return
+    if (wann_control%space_energy%gradient_check_tolerance <= 0.0_dp) then
+      call set_error_input(error, 'Error: sp_en_grad_check_tol must be positive', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'sp_en_grad_tol', found, error, comm, &
+                                   r_value=wann_control%space_energy%gradient_tolerance)
+    if (allocated(error)) return
+    if (wann_control%space_energy%gradient_tolerance < 0.0_dp) then
+      call set_error_input(error, 'Error: sp_en_grad_tol must be non-negative', comm)
+      return
+    end if
+
+    if ((wann_control%space_energy%gradient_check .or. &
+         wann_control%space_energy%gradient_tolerance > 0.0_dp) .and. &
+        .not. wann_control%space_energy%enabled) then
+      call set_error_input(error, &
+                           'Error: space-energy gradient checks require a nonzero sp_en_mix', comm)
+      return
+    end if
+    if (wann_control%space_energy%gradient_check .and. wann_control%num_iter == 0) then
+      call set_error_input(error, 'Error: sp_en_grad_check requires num_iter > 0', comm)
+      return
+    end if
+    if (wann_control%space_energy%gradient_tolerance > 0.0_dp .and. &
+        wann_control%conv_window <= 1) then
+      call set_error_input(error, 'Error: sp_en_grad_tol requires conv_window > 1', comm)
+      return
+    end if
+    if (wann_control%space_energy%gradient_tolerance > 0.0_dp .and. &
+        wann_control%num_iter <= wann_control%conv_window) then
+      call set_error_input(error, &
+                           'Error: sp_en_grad_tol requires num_iter > conv_window', comm)
+      return
+    end if
+
     call w90_readwrite_get_keyword(settings, 'write_info', found, error, comm, &
                                    l_value=wann_control%space_energy%write_info)
     if (allocated(error)) return
@@ -2176,6 +2227,16 @@ contains
           wann_control%space_energy%max_backtracks, '|'
         write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Minimum Armijo step                       :', &
           wann_control%space_energy%minimum_step, '|'
+        write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Check complete analytical gradient       :', &
+          wann_control%space_energy%gradient_check, '|'
+        if (wann_control%space_energy%gradient_check) then
+          write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Gradient-check tangent displacement       :', &
+            wann_control%space_energy%gradient_check_step, '|'
+          write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Gradient-check tolerance                  :', &
+            wann_control%space_energy%gradient_check_tolerance, '|'
+        end if
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  Mesh-normalized gradient convergence tol  :', &
+          wann_control%space_energy%gradient_tolerance, '|'
         write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Write space-energy information file      :', &
           wann_control%space_energy%write_info, '|'
         if (wann_control%space_energy%write_info) then

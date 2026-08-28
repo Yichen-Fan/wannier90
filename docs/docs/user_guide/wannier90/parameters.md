@@ -823,9 +823,15 @@ keyword is nonzero; omitting it or setting it to zero preserves the
 ordinary MLWF functional.
 
 The current implementation supports the general, non-`gamma_only`,
-Marzari-Vanderbilt localization path. Selective localization,
-`site_symmetry`, `use_ss_functional`, and `precond` are not yet supported
-in combination with this localizer.
+Marzari-Vanderbilt localization path. Symmetry-adapted DLWF calculations
+use the symmetry data in `seedname.dmn` and support both isolated bands
+and disentanglement within an entangled outer energy window. As for other
+symmetry-adapted calculations, an inner (frozen) energy window cannot be
+used. Before DLWF minimization, the projected Hamiltonian and its second
+moment are space-group averaged; this removes small symmetry violations in
+the parent eigenvalues from the energy-localization objective. Selective
+localization, `use_ss_functional`, and `precond` are not yet supported in
+combination with this localizer.
 
 The default value is 0.0 (disabled).
 
@@ -894,6 +900,57 @@ The default value is 24.
 Set the smallest step that Armijo backtracking may try. The default
 value is $10^{-14}$.
 
+### `logical :: sp_en_grad_check`
+
+Check the analytical gradient of the complete space-energy objective
+using the same distributed $U$ and overlap-matrix update path as the
+optimizer. The check uses central differences at $h$ and $h/2$ along
+both a gradient-aligned tangent and an independent deterministic
+anti-Hermitian tangent, then compares a Richardson-extrapolated slope
+with the analytical directional derivative. It runs on the first
+localization cycle and again immediately before gradient-based
+convergence is accepted.
+
+The check also rejects a non-anti-Hermitian analytical gradient and
+near-zero diagonal overlaps. It reports the base-state distance to the
+complex-log branch cut; nonsmooth trial behavior is rejected through
+the independent $h$ versus $h/2$ consistency test. A failure stops the
+run and restores the accepted state. The default value is `false`.
+
+### `real(kind=dp) :: sp_en_grad_check_step`
+
+Set the tangent-space displacement $h$ used by `sp_en_grad_check`.
+Reducing this value can avoid a nearby complex-log branch cut, but an
+excessively small value amplifies floating-point cancellation. The
+default value is $10^{-4}$.
+
+### `real(kind=dp) :: sp_en_grad_check_tol`
+
+Set the mixed absolute/relative tolerance for `sp_en_grad_check`.
+The comparison also includes a floating-point roundoff floor and
+requires the $h$ and $h/2$ central differences to be mutually
+consistent. The default value is $10^{-5}$.
+
+### `real(kind=dp) :: sp_en_grad_tol`
+
+Require the mesh-normalized RMS of the complete tangent gradient to be
+no larger than this value before space-energy localization can be
+reported as converged. Since the stored gradient contains a
+$1/N_k$ Brillouin-zone factor, the reported quantity is
+
+$$
+g_{\mathrm{RMS}}=\frac{\sqrt{N_k\sum_{kmn}|G_{mn}(k)|^2}}{N_W}.
+$$
+
+The ordinary `conv_window` objective test runs first. If its complete
+window passes but the gradient at that accepted state fails this test,
+the objective window is reset and must pass in full again. A positive
+value therefore requires `conv_window > 1` and
+`num_iter > conv_window`; reaching `num_iter` without satisfying both
+criteria stops the run instead of returning a nonstationary
+localization. Zero disables the extra convergence criterion and
+preserves the historical behavior. The default value is 0.0.
+
 ### `logical :: write_info`
 
 Write the final per-Wannier-function localization data to
@@ -930,6 +987,10 @@ sp_en_armijo_c1 = 1.0e-4
 sp_en_backtrack_factor = 0.5
 sp_en_max_backtracks = 24
 sp_en_min_step = 1.0e-14
+sp_en_grad_check = true
+sp_en_grad_check_step = 1.0e-4
+sp_en_grad_check_tol = 1.0e-7
+sp_en_grad_tol = 1.0e-6
 write_info = true
 num_occ = 4
 ```
@@ -1055,9 +1116,11 @@ The default value is `false`.
 
 ### `logical :: site_symmetry`
 
-Construct symmetry-adapted Wannier functions. For the detail of the
-theoretical background, see Ref. [@sakuma-prb13]. Cannot be used in
-conjunction with the inner (frozen) energy window.
+Construct symmetry-adapted Wannier functions using the symmetry data in
+`seedname.dmn`. For the detail of the theoretical background, see
+Ref. [@sakuma-prb13]. This option supports disentanglement within an
+entangled outer energy window, including for space-energy localization,
+but cannot be used in conjunction with an inner (frozen) energy window.
 
 The default value is `false`.
 

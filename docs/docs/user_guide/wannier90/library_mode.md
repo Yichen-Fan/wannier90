@@ -582,7 +582,10 @@ example-dos.py tests one of the DOS examples with the draft postw90 interface.
 
 ### Can symmetry adapted WF be calculated using the library?
 
-Not yet.
+Yes. Set `site_symmetry = true` as in a standalone calculation. Library
+clients lazily read the symmetry data from `seedname.dmn` when it is first
+needed, using the seedname passed to `w90_input_setopt`; no additional
+symmetry-data API call is required.
 
 ### C-interface is not built
 

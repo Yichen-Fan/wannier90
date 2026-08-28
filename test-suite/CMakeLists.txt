@@ -131,6 +131,15 @@ add_test(NAME test_space_energy_localizer_math
 )
 set_tests_properties(test_space_energy_localizer_math PROPERTIES LABELS unit)
 
+add_executable(test_hamiltonian_subspace_moments
+		tools/test_hamiltonian_subspace_moments.F90
+)
+target_link_libraries(test_hamiltonian_subspace_moments PRIVATE Wannier90_lib)
+add_test(NAME test_hamiltonian_subspace_moments
+		COMMAND $<TARGET_FILE:test_hamiltonian_subspace_moments>
+)
+set_tests_properties(test_hamiltonian_subspace_moments PROPERTIES LABELS unit)
+
 ## Add unit tests
 add_subdirectory(tests)
 

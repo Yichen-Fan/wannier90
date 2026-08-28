@@ -44,6 +44,7 @@ module w90_hamiltonian
   public :: hamiltonian_dealloc
   public :: hamiltonian_get_hr
   public :: hamiltonian_get_occupation_projector
+  public :: hamiltonian_get_subspace_moments
   public :: hamiltonian_get_subspace_eigenvalues
   public :: hamiltonian_setup
   public :: hamiltonian_write_hr
@@ -52,15 +53,79 @@ module w90_hamiltonian
 contains
 
   !================================================!
+  subroutine hamiltonian_get_subspace_moments(dis_manifold, eigval, hamiltonian_subspace, &
+                                               hamiltonian2_subspace, num_kpts, num_wann, &
+                                               have_disentangled, u_matrix_opt)
+    !================================================!
+    !! Project H and H^2 into the smooth num_wann-dimensional subspace.
+    !!
+    !! Keeping the complete matrices is required for symmetry-adapted
+    !! disentanglement: the symmetry-covariant gauge of u_matrix_opt does not,
+    !! in general, diagonalize the projected Hamiltonian.
+
+    use w90_types, only: dis_manifold_type
+
+    implicit none
+
+    type(dis_manifold_type), intent(in) :: dis_manifold
+    integer, intent(in) :: num_kpts, num_wann
+    real(kind=dp), intent(in) :: eigval(:, :)
+    complex(kind=dp), intent(out) :: hamiltonian_subspace(:, :, :)
+    complex(kind=dp), intent(out) :: hamiltonian2_subspace(:, :, :)
+    logical, intent(in) :: have_disentangled
+    complex(kind=dp), intent(in), optional :: u_matrix_opt(:, :, :)
+
+    integer :: band, counter, iw, jw, loop_kpt
+    complex(kind=dp) :: projector_element
+
+    hamiltonian_subspace = cmplx(0.0_dp, 0.0_dp, kind=dp)
+    hamiltonian2_subspace = cmplx(0.0_dp, 0.0_dp, kind=dp)
+    if (.not. have_disentangled) then
+      do loop_kpt = 1, num_kpts
+        do iw = 1, num_wann
+          hamiltonian_subspace(iw, iw, loop_kpt) = &
+            cmplx(eigval(iw, loop_kpt), 0.0_dp, kind=dp)
+          hamiltonian2_subspace(iw, iw, loop_kpt) = &
+            cmplx(eigval(iw, loop_kpt)**2, 0.0_dp, kind=dp)
+        end do
+      end do
+      return
+    end if
+
+    do loop_kpt = 1, num_kpts
+      counter = 0
+      do band = 1, size(eigval, 1)
+        if (dis_manifold%lwindow(band, loop_kpt)) then
+          counter = counter + 1
+          do jw = 1, num_wann
+            do iw = 1, num_wann
+              projector_element = conjg(u_matrix_opt(counter, iw, loop_kpt))* &
+                                    u_matrix_opt(counter, jw, loop_kpt)
+              hamiltonian_subspace(iw, jw, loop_kpt) = &
+                hamiltonian_subspace(iw, jw, loop_kpt) + &
+                eigval(band, loop_kpt)*projector_element
+              hamiltonian2_subspace(iw, jw, loop_kpt) = &
+                hamiltonian2_subspace(iw, jw, loop_kpt) + &
+                eigval(band, loop_kpt)**2*projector_element
+            end do
+          end do
+        end if
+      end do
+    end do
+
+  end subroutine hamiltonian_get_subspace_moments
+
+  !================================================!
   subroutine hamiltonian_get_subspace_eigenvalues(dis_manifold, eigval, eigval_subspace, &
                                                    num_kpts, num_wann, have_disentangled, &
                                                    u_matrix_opt)
     !================================================!
-    !! Return the eigenvalues of the smooth num_wann-dimensional subspace.
+    !! Return diagonal Hamiltonian expectation values in the smooth subspace.
     !!
     !! For an isolated manifold these are the first num_wann input eigenvalues.
-    !! After disentanglement, u_matrix_opt is chosen to diagonalize the projected
-    !! Hamiltonian, so its diagonal expectation values are the subspace energies.
+    !! This legacy helper is valid where u_matrix_opt diagonalizes the projected
+    !! Hamiltonian.  Symmetry-adapted gauges need the complete matrices returned
+    !! by hamiltonian_get_subspace_moments instead.
 
     use w90_types, only: dis_manifold_type
 

@@ -65,7 +65,8 @@ contains
                        m_matrix_loc, u_matrix, real_lattice, wannier_centres_translated, irvec, &
                        mp_grid, ndegen, nrpts, num_kpts, num_proj, num_wann, optimisation, &
                        rpt_origin, bands_plot_mode, transport_mode, lsitesymmetry, stdout, &
-                       timer, dist_k, error, comm, eigval_subspace, occupation_projector, seedname)
+                       timer, dist_k, error, comm, hamiltonian_subspace, hamiltonian2_subspace, &
+                       occupation_projector, seedname)
     !================================================!
     !
     !! Calculate the Unitary Rotations to give Maximally Localised Wannier Functions
@@ -81,6 +82,7 @@ contains
     use w90_sitesym, only: sitesym_symmetrize_gradient
     use w90_comms, only: mpisize, mpirank, comms_allreduce, w90_comm_type
     use w90_hamiltonian, only: hamiltonian_setup
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
 
     implicit none
 
@@ -113,7 +115,8 @@ contains
     real(kind=dp), intent(in) :: kpt_latt(:, :)
     real(kind=dp), intent(inout), allocatable :: wannier_centres_translated(:, :)
     real(kind=dp), intent(in) :: real_lattice(3, 3)
-    real(kind=dp), intent(in), optional :: eigval_subspace(:, :)
+    complex(kind=dp), intent(in), optional :: hamiltonian_subspace(:, :, :)
+    complex(kind=dp), intent(in), optional :: hamiltonian2_subspace(:, :, :)
     complex(kind=dp), intent(in), optional :: occupation_projector(:, :, :)
 
     complex(kind=dp), intent(inout), allocatable :: ham_k(:, :, :)
@@ -184,12 +187,14 @@ contains
     integer :: irguide
     integer :: irpt, loop_kpt
     integer :: nkrank
-    logical :: larmijo_stalled, lconverged, lrandom, lfirst, ltrust_capped
+    logical :: larmijo_stalled, lconverged, lobjective_converged
+    logical :: lrandom, lfirst, ltrust_capped
     logical :: lprint, ldump, lquad
     real(kind=dp) :: doda0
     real(kind=dp) :: falphamin, alphamin
     real(kind=dp) :: gcfac, gcnorm1, gcnorm0
     real(kind=dp) :: armijo_bound, direction_norm, maximum_step, save_spread, trial_step_used
+    real(kind=dp) :: space_energy_gradient_norm2, space_energy_gradient_rms
 
     ! pllel setup
     logical :: on_root = .false.
@@ -203,6 +208,16 @@ contains
         (.not. present(occupation_projector) .or. .not. present(seedname))) then
       call set_error_fatal(error, &
                            'write_info requires an occupation projector and seedname in wann_main', comm)
+      return
+    end if
+
+    if (wann_control%space_energy%enabled .and. &
+        (wann_control%space_energy%gradient_check .or. &
+         wann_control%space_energy%gradient_tolerance > 0.0_dp) .and. &
+        wann_control%use_ss_functional) then
+      call set_error_fatal(error, &
+                           'Space-energy gradient checking and convergence require the unconstrained '// &
+                           'Marzari-Vanderbilt tangent space', comm)
       return
     end if
 
@@ -502,12 +517,13 @@ contains
                     nkrank, global_k, error, comm)
     if (allocated(error)) return
     if (wann_control%space_energy%enabled) then
-      if (.not. present(eigval_subspace)) then
-        call set_error_fatal(error, 'Missing subspace eigenvalues for space-energy localization', comm)
+      if (.not. present(hamiltonian_subspace) .or. .not. present(hamiltonian2_subspace)) then
+        call set_error_fatal(error, 'Missing subspace Hamiltonian moments for space-energy localization', comm)
         return
       end if
       call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
-                                       eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                       hamiltonian_subspace, hamiltonian2_subspace, num_kpts, &
+                                       num_wann, nkrank, global_k, &
                                        energy_centre, energy_second, energy_spread, spatial_weight, &
                                        energy_weight, wann_spread, error, comm)
       if (allocated(error)) return
@@ -585,6 +601,7 @@ contains
     end if
 
     lconverged = .false.
+    lobjective_converged = .false.
     lfirst = .true.
     lrandom = .false.
     conv_count = 0
@@ -630,9 +647,64 @@ contains
                          print_output%iprint, orbital_weight=spatial_weight)
         if (allocated(error)) return
 
-        call wann_space_energy_gradient(u_matrix_loc, eigval_subspace, energy_centre, energy_weight, &
-                                        num_kpts, num_wann, nkrank, global_k, energy_gradient)
+        call wann_space_energy_gradient(u_matrix_loc, hamiltonian_subspace, hamiltonian2_subspace, &
+                                        energy_centre, energy_weight, num_kpts, num_wann, nkrank, &
+                                        global_k, energy_gradient)
         cdodq_loc = cdodq_loc + energy_gradient
+
+        if (lsitesymmetry) then
+          call internal_reduce_site_symmetry_tangent(cdodq_loc)
+          if (allocated(error)) return
+        end if
+
+        ! cdodq_loc contains a Brillouin-zone average and therefore scales as
+        ! 1/num_kpts.  Undo that mesh dependence before reporting or testing
+        ! the per-matrix-element RMS tangent derivative.
+        space_energy_gradient_norm2 = sum(abs(cdodq_loc)**2)
+        call comms_allreduce(space_energy_gradient_norm2, 1, 'SUM', error, comm)
+        if (allocated(error)) return
+        if (.not. ieee_is_finite(space_energy_gradient_norm2)) then
+          call set_error_fatal(error, 'Space-energy gradient contains NaN or infinity', comm)
+          return
+        end if
+        space_energy_gradient_rms = &
+          sqrt(real(num_kpts, dp)*max(space_energy_gradient_norm2, 0.0_dp))/real(num_wann, dp)
+
+        if (lprint .and. print_output%iprint > 0) then
+          write (stdout, '(3x,a,es14.6)') &
+            'Mesh-normalized space-energy gradient RMS = ', space_energy_gradient_rms
+        end if
+
+        if (wann_control%space_energy%gradient_check .and. &
+            (iter == 1 .or. lobjective_converged)) then
+          call internal_check_space_energy_gradient(iter)
+          if (allocated(error)) return
+        end if
+
+        if (lobjective_converged) then
+          if (space_energy_gradient_rms <= wann_control%space_energy%gradient_tolerance) then
+            lconverged = .true.
+            if (print_output%iprint > 0) then
+              write (stdout, '(/13x,a,es10.3,a)') '<<< Gradient RMS <', &
+                wann_control%space_energy%gradient_tolerance, ' at the accepted state >>>'
+              write (stdout, '(13x,a/)') &
+                '<<< Objective and gradient convergence criteria satisfied >>>'
+            end if
+            exit
+          end if
+
+          if (print_output%iprint > 0) then
+            write (stdout, '(3x,a,es12.4,a,es12.4)') &
+              'Objective window passed, but gradient RMS ', space_energy_gradient_rms, &
+              ' exceeds ', wann_control%space_energy%gradient_tolerance
+            write (stdout, '(3x,a,i0,a)') 'Resetting the ', wann_control%conv_window, &
+              '-iteration objective window and continuing.'
+          end if
+          lobjective_converged = .false.
+          lconverged = .false.
+          conv_count = 0
+          ncg = wann_control%num_cg_steps
+        end if
       else if (lsitesymmetry .or. wann_control%precond) then
         call wann_domega(csheet, sheet, rave, num_wann, kmesh_info, num_kpts, &
                          wann_control%constrain, wann_control%use_ss_functional, lsitesymmetry, &
@@ -667,7 +739,20 @@ contains
       if (allocated(error)) return
 
       if (lsitesymmetry) then
-        call sitesym_symmetrize_gradient(sitesym, cdq, 2, num_kpts, num_wann, error, comm)
+        ! CG combinations remain in the constrained tangent, but optional
+        ! convergence noise is generated independently at every k-point.
+        ! Project the final direction as well, then update the line-search
+        ! slope to match the direction that will actually be applied.
+        call internal_reduce_site_symmetry_tangent(cdq_loc)
+        if (allocated(error)) return
+        doda0 = -real(sum(conjg(cdodq_loc)*cdq_loc), dp)
+        call comms_allreduce(doda0, 1, 'SUM', error, comm)
+        if (allocated(error)) return
+        doda0 = doda0/(4.0_dp*kmesh_info%wbtot)
+        if (doda0 > 0.0_dp) then
+          cdq_loc = -cdq_loc
+          doda0 = -doda0
+        end if
       end if
 
       ! save search direction
@@ -730,7 +815,8 @@ contains
         if (allocated(error)) return
         if (wann_control%space_energy%enabled) then
           call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
-                                           eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                           hamiltonian_subspace, hamiltonian2_subspace, num_kpts, &
+                                           num_wann, nkrank, global_k, &
                                            energy_centre, energy_second, energy_spread, spatial_weight, &
                                            energy_weight, trial_spread, error, comm)
           if (allocated(error)) return
@@ -810,7 +896,8 @@ contains
         if (allocated(error)) return
         if (wann_control%space_energy%enabled) then
           call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
-                                           eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                           hamiltonian_subspace, hamiltonian2_subspace, num_kpts, &
+                                           num_wann, nkrank, global_k, &
                                            energy_centre, energy_second, energy_spread, spatial_weight, &
                                            energy_weight, wann_spread, error, comm)
           if (allocated(error)) return
@@ -980,6 +1067,18 @@ contains
       end if
 
       if (lconverged) then
+        if (wann_control%space_energy%enabled .and. &
+            wann_control%space_energy%gradient_tolerance > 0.0_dp) then
+          lobjective_converged = .true.
+          lconverged = .false.
+          if (print_output%iprint > 0) then
+            write (stdout, '(3x,a,i0,a)') 'Objective change passed its ', &
+              wann_control%conv_window, '-iteration window.'
+            write (stdout, '(3x,a)') &
+              'The gradient will be evaluated at this accepted state before convergence is declared.'
+          end if
+          cycle
+        end if
         if (print_output%iprint > 0) then
           write (stdout, '(/13x,a,es10.3,a,i2,a)') '<<<     Delta <', wann_control%conv_tol, &
             '  over ', wann_control%conv_window, ' iterations     >>>'
@@ -990,6 +1089,20 @@ contains
 
     end do
     ! end of the minimization loop
+
+    if (wann_control%space_energy%enabled .and. &
+        wann_control%space_energy%gradient_tolerance > 0.0_dp .and. .not. lconverged) then
+      if (larmijo_stalled) then
+        call set_error_fatal(error, &
+                             'Space-energy localization stalled before satisfying both '// &
+                             'objective and gradient convergence criteria', comm)
+      else
+        call set_error_fatal(error, &
+                             'Space-energy localization reached num_iter without satisfying both '// &
+                             'objective and gradient convergence criteria', comm)
+      end if
+      return
+    end if
 
     ! copy from local u matrix back to full matrix & reduce
     u_matrix(:, :, :) = 0.0_dp
@@ -1140,6 +1253,11 @@ contains
       call set_error_dealloc(error, 'Error in deallocating cdodq_loc in wann_main', comm)
       return
     end if
+    deallocate (energy_gradient, stat=ierr)
+    if (ierr /= 0) then
+      call set_error_dealloc(error, 'Error in deallocating energy_gradient in wann_main', comm)
+      return
+    end if
     deallocate (cdqkeep_loc, stat=ierr)
     if (ierr /= 0) then
       call set_error_dealloc(error, 'Error in deallocating cdqkeep_loc in wann_main', comm)
@@ -1256,6 +1374,314 @@ contains
   contains
 
     !================================================!
+    subroutine internal_reduce_site_symmetry_tangent(tangent_loc)
+      !================================================!
+      !! Gather a distributed tangent, reduce symmetry-related k-points onto
+      !! their irreducible representatives, project onto each little-group
+      !! invariant subspace, and return the distributed reduced tangent.
+
+      implicit none
+
+      complex(kind=dp), intent(inout) :: tangent_loc(:, :, :)
+
+      integer :: nkp_global, nkp_local
+
+      cdodq = cmplx_0
+      do nkp_local = 1, nkrank
+        nkp_global = global_k(nkp_local)
+        cdodq(:, :, nkp_global) = tangent_loc(:, :, nkp_local)
+      end do
+      call comms_allreduce(cdodq(1, 1, 1), num_wann*num_wann*num_kpts, 'SUM', error, comm)
+      if (allocated(error)) return
+
+      call sitesym_symmetrize_gradient(sitesym, cdodq, 1, num_kpts, num_wann, error, comm)
+      if (allocated(error)) return
+      call sitesym_symmetrize_gradient(sitesym, cdodq, 2, num_kpts, num_wann, error, comm)
+      if (allocated(error)) return
+
+      do nkp_local = 1, nkrank
+        nkp_global = global_k(nkp_local)
+        tangent_loc(:, :, nkp_local) = cdodq(:, :, nkp_global)
+      end do
+
+    end subroutine internal_reduce_site_symmetry_tangent
+
+    !================================================!
+    subroutine internal_restore_space_energy_snapshot()
+      !================================================!
+      !! Restore U and M without evaluating the objective or entering an MPI
+      !! collective.  This is also the error-path cleanup for gradient trials.
+
+      implicit none
+
+      u_matrix_loc = u0_loc
+      if (optimisation <= 0) then
+        read (page_unit) m_matrix_loc
+        rewind (page_unit)
+      else
+        m_matrix_loc = m0_loc
+      end if
+
+    end subroutine internal_restore_space_energy_snapshot
+
+    !================================================!
+    subroutine internal_check_space_energy_gradient(iteration)
+      !================================================!
+      !! Check the analytical derivative of the complete space-energy
+      !! objective along two anti-Hermitian tangent directions.  The check
+      !! uses the production U/M update and objective routines, then restores
+      !! every state-dependent work array by evaluating the zero step.
+
+      implicit none
+
+      integer, intent(in) :: iteration
+
+      integer :: direction_id, m, n, neighbor, nkp_local
+      real(kind=dp) :: absolute_error, analytic_derivative, base_objective
+      real(kind=dp) :: consistency_error, consistency_tolerance, direction_norm
+      real(kind=dp) :: fd_h, fd_half_h, fd_richardson, fd_scale
+      real(kind=dp) :: f_minus_h, f_minus_half_h, f_plus_h, f_plus_half_h
+      real(kind=dp) :: gradient_max, antihermitian_error, antihermitian_tolerance
+      real(kind=dp) :: h, minimum_mnn, minimum_phase_margin, phase, relative_error
+      real(kind=dp) :: check_start_time, roundoff_floor, seed, tolerance
+      complex(kind=dp) :: deterministic_value, phased_overlap
+      character(len=24) :: direction_label
+      logical :: check_failed, direction_available, safe_to_evaluate
+
+      h = wann_control%space_energy%gradient_check_step
+      base_objective = wann_spread%objective
+      check_failed = .false.
+      safe_to_evaluate = .true.
+      check_start_time = io_wallclocktime()
+      if (print_output%timing_level > 1 .and. print_output%iprint > 0) &
+        call io_stopwatch_start('wann: main: gradient_check', timer)
+
+      gradient_max = 0.0_dp
+      antihermitian_error = 0.0_dp
+      do nkp_local = 1, nkrank
+        do n = 1, num_wann
+          do m = 1, num_wann
+            gradient_max = max(gradient_max, abs(cdodq_loc(m, n, nkp_local)))
+            antihermitian_error = max(antihermitian_error, &
+              abs(cdodq_loc(m, n, nkp_local) + conjg(cdodq_loc(n, m, nkp_local))))
+          end do
+        end do
+      end do
+      call comms_allreduce(gradient_max, 1, 'MAX', error, comm)
+      if (allocated(error)) return
+      call comms_allreduce(antihermitian_error, 1, 'MAX', error, comm)
+      if (allocated(error)) return
+      antihermitian_tolerance = max(1000.0_dp*epsilon(1.0_dp), 1.0e-10_dp)* &
+                                max(1.0_dp, gradient_max)
+      if (antihermitian_error > antihermitian_tolerance) then
+        check_failed = .true.
+        safe_to_evaluate = .false.
+      end if
+
+      minimum_mnn = huge(1.0_dp)
+      minimum_phase_margin = huge(1.0_dp)
+      do nkp_local = 1, nkrank
+        do neighbor = 1, kmesh_info%nntot
+          do n = 1, num_wann
+            minimum_mnn = min(minimum_mnn, abs(m_matrix_loc(n, n, neighbor, nkp_local)))
+            phased_overlap = csheet(n, neighbor, global_k(nkp_local))* &
+                             m_matrix_loc(n, n, neighbor, nkp_local)
+            phase = atan2(aimag(phased_overlap), real(phased_overlap, dp))
+            minimum_phase_margin = min(minimum_phase_margin, &
+                                       abs(0.5_dp*twopi - abs(phase)))
+          end do
+        end do
+      end do
+      call comms_allreduce(minimum_mnn, 1, 'MIN', error, comm)
+      if (allocated(error)) return
+      call comms_allreduce(minimum_phase_margin, 1, 'MIN', error, comm)
+      if (allocated(error)) return
+
+      if (minimum_mnn <= sqrt(epsilon(1.0_dp))) then
+        check_failed = .true.
+        safe_to_evaluate = .false.
+      end if
+      if (on_root .and. print_output%iprint > 0) then
+        write (stdout, '(/3x,a,i0)') 'Complete space-energy gradient check at cycle ', iteration
+        write (stdout, '(5x,a,es14.6)') 'max |G + G^dagger|       = ', antihermitian_error
+        write (stdout, '(5x,a,es14.6)') 'minimum |M_nn|           = ', minimum_mnn
+        write (stdout, '(5x,a,es14.6)') 'base log-branch margin   = ', minimum_phase_margin
+        if (antihermitian_error > antihermitian_tolerance) &
+          write (stdout, '(5x,a)') 'FAIL: the analytical gradient is not anti-Hermitian.'
+        if (minimum_mnn <= sqrt(epsilon(1.0_dp))) &
+          write (stdout, '(5x,a)') 'FAIL: a diagonal overlap is too small for a stable derivative.'
+        if (minimum_phase_margin <= 2.0_dp*h) &
+          write (stdout, '(5x,a)') &
+            'WARNING: close to a log branch; h versus h/2 consistency will test smoothness.'
+      end if
+
+      ! energy_gradient is no longer needed after it has been accumulated
+      ! into cdodq_loc, so reuse it to preserve the previous CG direction.
+      energy_gradient = cdqkeep_loc
+      u0_loc = u_matrix_loc
+      if (optimisation <= 0) then
+        write (page_unit) m_matrix_loc
+        rewind (page_unit)
+      else
+        m0_loc = m_matrix_loc
+      end if
+
+      if (safe_to_evaluate) then
+        do direction_id = 1, 2
+          cdqkeep_loc = cmplx_0
+          if (direction_id == 1) then
+            direction_label = 'gradient-aligned'
+            cdqkeep_loc = cdodq_loc
+          else
+            direction_label = 'independent'
+            do nkp_local = 1, nkrank
+              do n = 1, num_wann
+                seed = real(17*global_k(nkp_local) + 11*n, dp)
+                cdqkeep_loc(n, n, nkp_local) = &
+                  cmplx(0.0_dp, sin(seed), kind=dp)
+                do m = n + 1, num_wann
+                  seed = real(19*global_k(nkp_local) + 7*m + 13*n, dp)
+                  deterministic_value = cmplx(sin(seed), cos(sqrt(2.0_dp)*seed), kind=dp)
+                  cdqkeep_loc(m, n, nkp_local) = deterministic_value
+                  cdqkeep_loc(n, m, nkp_local) = -conjg(deterministic_value)
+                end do
+              end do
+            end do
+            if (lsitesymmetry) then
+              call internal_reduce_site_symmetry_tangent(cdqkeep_loc)
+              if (allocated(error)) go to 900
+            end if
+          end if
+
+          direction_norm = 0.0_dp
+          do nkp_local = 1, nkrank
+            direction_norm = max(direction_norm, &
+                                 sqrt(sum(abs(cdqkeep_loc(:, :, nkp_local))**2)))
+          end do
+          call comms_allreduce(direction_norm, 1, 'MAX', error, comm)
+          if (allocated(error)) go to 900
+          direction_available = direction_norm > sqrt(tiny(1.0_dp))
+
+          if (.not. direction_available) then
+            if (on_root .and. print_output%iprint > 0) then
+              write (stdout, '(5x,a,a)') trim(direction_label), &
+                ': skipped because the tangent direction is numerically zero'
+            end if
+            cycle
+          end if
+
+          cdqkeep_loc = cdqkeep_loc/direction_norm
+          analytic_derivative = -real(sum(conjg(cdodq_loc)*cdqkeep_loc), dp)
+          call comms_allreduce(analytic_derivative, 1, 'SUM', error, comm)
+          if (allocated(error)) go to 900
+
+          ! internal_restore_and_evaluate_space_energy_step applies
+          ! step*cdqkeep/(4*wbtot); scale the stored direction so that the
+          ! actual tangent generator is exactly step*A.
+          cdqkeep_loc = cdqkeep_loc*(4.0_dp*kmesh_info%wbtot)
+
+          call internal_restore_and_evaluate_space_energy_step(h, trial_spread)
+          if (allocated(error)) go to 900
+          f_plus_h = trial_spread%objective
+          call internal_restore_and_evaluate_space_energy_step(-h, trial_spread)
+          if (allocated(error)) go to 900
+          f_minus_h = trial_spread%objective
+          call internal_restore_and_evaluate_space_energy_step(0.5_dp*h, trial_spread)
+          if (allocated(error)) go to 900
+          f_plus_half_h = trial_spread%objective
+          call internal_restore_and_evaluate_space_energy_step(-0.5_dp*h, trial_spread)
+          if (allocated(error)) go to 900
+          f_minus_half_h = trial_spread%objective
+
+          if (.not. ieee_is_finite(analytic_derivative) .or. &
+              .not. ieee_is_finite(f_plus_h) .or. .not. ieee_is_finite(f_minus_h) .or. &
+              .not. ieee_is_finite(f_plus_half_h) .or. &
+              .not. ieee_is_finite(f_minus_half_h)) then
+            check_failed = .true.
+            if (on_root .and. print_output%iprint > 0) then
+              write (stdout, '(5x,a)') trim(direction_label)//' direction:'
+              write (stdout, '(7x,a)') 'FAIL: non-finite objective or analytical derivative'
+            end if
+            cycle
+          end if
+
+          fd_h = (f_plus_h - f_minus_h)/(2.0_dp*h)
+          fd_half_h = (f_plus_half_h - f_minus_half_h)/h
+          fd_richardson = (4.0_dp*fd_half_h - fd_h)/3.0_dp
+          absolute_error = abs(fd_richardson - analytic_derivative)
+          relative_error = absolute_error/max(abs(fd_richardson), &
+                                              abs(analytic_derivative), tiny(1.0_dp))
+          consistency_error = abs(fd_half_h - fd_h)
+          fd_scale = max(1.0_dp, abs(fd_richardson), abs(analytic_derivative))
+          roundoff_floor = 64.0_dp*epsilon(1.0_dp)* &
+            max(1.0_dp, abs(base_objective), abs(f_plus_h), abs(f_minus_h), &
+                abs(f_plus_half_h), abs(f_minus_half_h))/h
+          tolerance = max(wann_control%space_energy%gradient_check_tolerance*fd_scale, &
+                          roundoff_floor)
+          consistency_tolerance = 8.0_dp*tolerance
+
+          if (absolute_error > tolerance .or. &
+              consistency_error > consistency_tolerance) check_failed = .true.
+
+          if (on_root .and. print_output%iprint > 0) then
+            write (stdout, '(5x,a)') trim(direction_label)//' direction:'
+            write (stdout, '(7x,a,es18.9)') 'analytical       = ', analytic_derivative
+            write (stdout, '(7x,a,es18.9)') 'central(h)       = ', fd_h
+            write (stdout, '(7x,a,es18.9)') 'central(h/2)     = ', fd_half_h
+            write (stdout, '(7x,a,es18.9)') 'Richardson       = ', fd_richardson
+            write (stdout, '(7x,a,es18.9)') 'absolute error   = ', absolute_error
+            write (stdout, '(7x,a,es18.9)') 'relative error   = ', relative_error
+            write (stdout, '(7x,a,es18.9)') 'h consistency    = ', consistency_error
+            if (absolute_error <= tolerance .and. &
+                consistency_error <= consistency_tolerance) then
+              write (stdout, '(7x,a)') 'PASS'
+            else
+              write (stdout, '(7x,a)') 'FAIL'
+            end if
+          end if
+        end do
+      end if
+
+      ! Restore the accepted state and the previous CG direction even when a
+      ! numerical mismatch was found, so diagnostics never leave a trial
+      ! localization in memory.
+      cdqkeep_loc = energy_gradient
+      call internal_restore_and_evaluate_space_energy_step(0.0_dp, trial_spread)
+      if (allocated(error)) go to 900
+      absolute_error = abs(trial_spread%objective - base_objective)
+      tolerance = 1000.0_dp*epsilon(1.0_dp)*max(1.0_dp, abs(base_objective))
+      if (absolute_error > tolerance) then
+        check_failed = .true.
+        if (on_root .and. print_output%iprint > 0) &
+          write (stdout, '(5x,a,es14.6)') 'FAIL: objective restoration error = ', absolute_error
+      end if
+
+      if (on_root .and. print_output%iprint > 0) then
+        write (stdout, '(5x,a,f10.3,a)') &
+          'gradient-check wall time = ', io_wallclocktime() - check_start_time, ' s'
+        write (stdout, *)
+      end if
+      if (print_output%timing_level > 1 .and. print_output%iprint > 0) &
+        call io_stopwatch_stop('wann: main: gradient_check', timer)
+      if (check_failed) then
+        call set_error_fatal(error, &
+                             'Complete space-energy finite-difference gradient check failed', comm)
+        return
+      end if
+
+      return
+
+900   continue
+      ! Preserve the original error while restoring all caller-visible state.
+      cdqkeep_loc = energy_gradient
+      call internal_restore_space_energy_snapshot()
+      if (print_output%timing_level > 1 .and. print_output%iprint > 0) &
+        call io_stopwatch_stop('wann: main: gradient_check', timer)
+      return
+
+    end subroutine internal_check_space_energy_gradient
+
+    !================================================!
     subroutine internal_restore_and_evaluate_space_energy_step(step, spread)
       !================================================!
       !! Restore the iteration snapshot, apply one unitary step, and evaluate
@@ -1266,13 +1692,7 @@ contains
       real(kind=dp), intent(in) :: step
       type(localisation_vars_type), intent(out) :: spread
 
-      u_matrix_loc = u0_loc
-      if (optimisation <= 0) then
-        read (page_unit) m_matrix_loc
-        rewind (page_unit)
-      else
-        m_matrix_loc = m0_loc
-      end if
+      call internal_restore_space_energy_snapshot()
 
       if (step /= 0.0_dp) then
         cdq_loc(:, :, :) = cdqkeep_loc(:, :, :)*(step/(4.0_dp*kmesh_info%wbtot))
@@ -1290,7 +1710,8 @@ contains
                       nkrank, global_k, error, comm)
       if (allocated(error)) return
       call wann_space_energy_objective(wann_control%space_energy, r2ave - rave2, u_matrix_loc, &
-                                       eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                       hamiltonian_subspace, hamiltonian2_subspace, num_kpts, &
+                                       num_wann, nkrank, global_k, &
                                        energy_centre, energy_second, energy_spread, spatial_weight, &
                                        energy_weight, spread, error, comm)
       if (allocated(error)) return
@@ -2155,7 +2576,8 @@ contains
 
   !================================================!
   subroutine wann_space_energy_objective(space_energy, spatial_spread, u_matrix_loc, &
-                                         eigval_subspace, num_kpts, num_wann, nkrank, global_k, &
+                                         hamiltonian_subspace, hamiltonian2_subspace, num_kpts, &
+                                         num_wann, nkrank, global_k, &
                                          energy_centre, energy_second, energy_spread, spatial_weight, &
                                          energy_weight, wann_spread, error, comm)
     !================================================!
@@ -2172,26 +2594,29 @@ contains
     type(w90_comm_type), intent(in) :: comm
 
     integer, intent(in) :: num_kpts, num_wann, nkrank, global_k(:)
-    real(kind=dp), intent(in) :: spatial_spread(:), eigval_subspace(:, :)
+    real(kind=dp), intent(in) :: spatial_spread(:)
     real(kind=dp), intent(out) :: energy_centre(:), energy_second(:), energy_spread(:)
     real(kind=dp), intent(out) :: spatial_weight(:), energy_weight(:)
     complex(kind=dp), intent(in) :: u_matrix_loc(:, :, :)
+    complex(kind=dp), intent(in) :: hamiltonian_subspace(:, :, :)
+    complex(kind=dp), intent(in) :: hamiltonian2_subspace(:, :, :)
 
-    integer :: band, iw, nkp, nkp_loc
+    integer :: iw, nkp, nkp_loc
     real(kind=dp) :: deriv_energy, deriv_spatial, energy_component, orbital_objective
     real(kind=dp) :: spatial_component
+    complex(kind=dp) :: ham(num_wann, num_wann), ham2(num_wann, num_wann)
 
     energy_centre = 0.0_dp
     energy_second = 0.0_dp
     do nkp_loc = 1, nkrank
       nkp = global_k(nkp_loc)
+      ham = matmul(conjg(transpose(u_matrix_loc(:, :, nkp_loc))), &
+                   matmul(hamiltonian_subspace(:, :, nkp), u_matrix_loc(:, :, nkp_loc)))
+      ham2 = matmul(conjg(transpose(u_matrix_loc(:, :, nkp_loc))), &
+                    matmul(hamiltonian2_subspace(:, :, nkp), u_matrix_loc(:, :, nkp_loc)))
       do iw = 1, num_wann
-        do band = 1, num_wann
-          energy_centre(iw) = energy_centre(iw) + eigval_subspace(band, nkp)* &
-                              abs(u_matrix_loc(band, iw, nkp_loc))**2
-          energy_second(iw) = energy_second(iw) + eigval_subspace(band, nkp)**2* &
-                              abs(u_matrix_loc(band, iw, nkp_loc))**2
-        end do
+        energy_centre(iw) = energy_centre(iw) + real(ham(iw, iw), dp)
+        energy_second(iw) = energy_second(iw) + real(ham2(iw, iw), dp)
       end do
     end do
 
@@ -2219,9 +2644,9 @@ contains
   end subroutine wann_space_energy_objective
 
   !================================================!
-  subroutine wann_space_energy_gradient(u_matrix_loc, eigval_subspace, energy_centre, &
-                                        energy_weight, num_kpts, num_wann, nkrank, global_k, &
-                                        energy_gradient)
+  subroutine wann_space_energy_gradient(u_matrix_loc, hamiltonian_subspace, &
+                                        hamiltonian2_subspace, energy_centre, energy_weight, &
+                                        num_kpts, num_wann, nkrank, global_k, energy_gradient)
     !================================================!
     !! Gradient of sum_n energy_weight(n) Var_n(H).
     !!
@@ -2232,29 +2657,23 @@ contains
     implicit none
 
     integer, intent(in) :: num_kpts, num_wann, nkrank, global_k(:)
-    real(kind=dp), intent(in) :: eigval_subspace(:, :), energy_centre(:), energy_weight(:)
+    real(kind=dp), intent(in) :: energy_centre(:), energy_weight(:)
     complex(kind=dp), intent(in) :: u_matrix_loc(:, :, :)
+    complex(kind=dp), intent(in) :: hamiltonian_subspace(:, :, :)
+    complex(kind=dp), intent(in) :: hamiltonian2_subspace(:, :, :)
     complex(kind=dp), intent(out) :: energy_gradient(:, :, :)
 
-    integer :: band, m, n, nkp, nkp_loc
+    integer :: m, n, nkp, nkp_loc
     complex(kind=dp) :: ham(num_wann, num_wann), ham2(num_wann, num_wann)
     real(kind=dp) :: weighted_mean_m, weighted_mean_n
 
     energy_gradient = cmplx(0.0_dp, 0.0_dp, kind=dp)
     do nkp_loc = 1, nkrank
       nkp = global_k(nkp_loc)
-      ham = cmplx(0.0_dp, 0.0_dp, kind=dp)
-      ham2 = cmplx(0.0_dp, 0.0_dp, kind=dp)
-      do n = 1, num_wann
-        do m = 1, num_wann
-          do band = 1, num_wann
-            ham(m, n) = ham(m, n) + eigval_subspace(band, nkp)* &
-                        conjg(u_matrix_loc(band, m, nkp_loc))*u_matrix_loc(band, n, nkp_loc)
-            ham2(m, n) = ham2(m, n) + eigval_subspace(band, nkp)**2* &
-                         conjg(u_matrix_loc(band, m, nkp_loc))*u_matrix_loc(band, n, nkp_loc)
-          end do
-        end do
-      end do
+      ham = matmul(conjg(transpose(u_matrix_loc(:, :, nkp_loc))), &
+                   matmul(hamiltonian_subspace(:, :, nkp), u_matrix_loc(:, :, nkp_loc)))
+      ham2 = matmul(conjg(transpose(u_matrix_loc(:, :, nkp_loc))), &
+                    matmul(hamiltonian2_subspace(:, :, nkp), u_matrix_loc(:, :, nkp_loc)))
 
       do n = 1, num_wann
         do m = 1, num_wann

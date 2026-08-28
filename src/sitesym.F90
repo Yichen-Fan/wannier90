@@ -52,6 +52,7 @@ module w90_sitesym
   public  :: sitesym_replace_d_matrix_band
   public  :: sitesym_slim_d_matrix_band
   public  :: sitesym_symmetrize_gradient
+  public  :: sitesym_symmetrize_matrix
   public  :: sitesym_symmetrize_rotation
   public  :: sitesym_symmetrize_u_matrix
   public  :: sitesym_symmetrize_zmatrix
@@ -303,6 +304,74 @@ contains
     end if
     return
   end subroutine sitesym_symmetrize_gradient
+
+  !================================================!
+  subroutine sitesym_symmetrize_matrix(sitesym, matrix, num_kpts, num_wann, error, comm)
+    !================================================!
+    !! Space-group average a Hermitian matrix field in the active subspace.
+    !!
+    !! For each irreducible k-point, matrices at every symmetry image are
+    !! transported back to the representative, averaged over the complete
+    !! group, and transported over the star.  d_matrix_band represents the
+    !! isolated band basis, or the smooth num_wann subspace after disentanglement
+    !! replaces it.  This is used for projected H and H^2 when small symmetry
+    !! violations remain in the parent eigenvalues.
+
+    use w90_wannier90_types, only: sitesym_type
+
+    implicit none
+
+    type(sitesym_type), intent(in) :: sitesym
+    type(w90_error_type), allocatable, intent(out) :: error
+    type(w90_comm_type), intent(in) :: comm
+    integer, intent(in) :: num_kpts, num_wann
+    complex(kind=dp), intent(inout) :: matrix(:, :, :)
+
+    integer :: ir, irk, isym
+    complex(kind=dp) :: averaged(num_wann, num_wann)
+    complex(kind=dp) :: transformed(num_wann, num_wann)
+    logical :: assigned(num_kpts)
+
+    if (.not. allocated(sitesym%d_matrix_band)) then
+      call set_error_fatal(error, 'missing representation in sitesym_symmetrize_matrix', comm)
+      return
+    end if
+    if (size(sitesym%d_matrix_band, 1) /= num_wann .or. &
+        size(sitesym%d_matrix_band, 2) /= num_wann) then
+      call set_error_fatal(error, 'invalid representation size in sitesym_symmetrize_matrix', comm)
+      return
+    end if
+
+    assigned = .false.
+    do ir = 1, sitesym%nkptirr
+      averaged = cmplx_0
+      do isym = 1, sitesym%nsymmetry
+        irk = sitesym%kptsym(isym, ir)
+        transformed = matmul(conjg(transpose(sitesym%d_matrix_band(:, :, isym, ir))), &
+                             matmul(matrix(:, :, irk), &
+                                    sitesym%d_matrix_band(:, :, isym, ir)))
+        averaged = averaged + transformed
+      end do
+      averaged = averaged/real(sitesym%nsymmetry, dp)
+      averaged = 0.5_dp*(averaged + conjg(transpose(averaged)))
+
+      do isym = 1, sitesym%nsymmetry
+        irk = sitesym%kptsym(isym, ir)
+        if (assigned(irk)) cycle
+        transformed = matmul(sitesym%d_matrix_band(:, :, isym, ir), &
+                             matmul(averaged, &
+                                    conjg(transpose(sitesym%d_matrix_band(:, :, isym, ir)))))
+        matrix(:, :, irk) = 0.5_dp*(transformed + conjg(transpose(transformed)))
+        assigned(irk) = .true.
+      end do
+    end do
+
+    if (any(.not. assigned)) then
+      call set_error_fatal(error, 'error in sitesym_symmetrize_matrix', comm)
+      return
+    end if
+
+  end subroutine sitesym_symmetrize_matrix
 
   !================================================!
   subroutine sitesym_symmetrize_rotation(sitesym, urot, num_kpts, num_wann, error, comm)

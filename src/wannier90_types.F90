@@ -203,6 +203,14 @@ module w90_wannier90_types
     !! Smallest step allowed during Armijo backtracking.
     integer :: max_backtracks = 24
     !! Maximum number of rejected Armijo trials per iteration.
+    logical :: gradient_check = .false.
+    !! Numerically check the complete objective gradient at runtime.
+    real(kind=dp) :: gradient_check_step = 1.0e-4_dp
+    !! Tangent-space displacement used by the finite-difference check.
+    real(kind=dp) :: gradient_check_tolerance = 1.0e-5_dp
+    !! Mixed absolute/relative tolerance for the finite-difference check.
+    real(kind=dp) :: gradient_tolerance = 0.0_dp
+    !! Mesh-normalized gradient RMS required for convergence; zero disables it.
     logical :: write_info = .false.
     !! Write final per-WF space, energy, and optional occupation data to seedname.info.
     integer :: num_occ = 0
