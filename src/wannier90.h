@@ -18,6 +18,7 @@ typedef struct {
 
 void w90_create(w90_data* w90_obj);
 void w90_delete(w90_data* w90_obj);
+int w90_get_sitesym_support_version(void);
 
 void w90_set_option_double2d_f(w90_data w90_obj, CFI_cdesc_t* keyword, double* arg_cptr, int x, int y);
 void w90_set_option_double2d(w90_data blob, const char* key, double* data, int x, int y);

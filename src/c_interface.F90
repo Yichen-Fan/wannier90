@@ -53,6 +53,11 @@ module w90_library_c
 
 contains
 
+  integer(kind=c_int) function w90_get_sitesym_support_version() bind(c)
+    !! ABI marker used by clients before enabling library-mode site symmetry.
+    w90_get_sitesym_support_version = 1_c_int
+  end function w90_get_sitesym_support_version
+
   subroutine w90_create(w90_obj) bind(c)
     !! return a c-pointer to a instance of the wannier90 library data structure
     type(lib_common_type), pointer :: common_data

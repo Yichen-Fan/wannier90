@@ -56,6 +56,7 @@ module w90_sitesym
   public  :: sitesym_symmetrize_rotation
   public  :: sitesym_symmetrize_u_matrix
   public  :: sitesym_symmetrize_zmatrix
+  public  :: sitesym_validate_data
 
 contains
 
@@ -130,6 +131,83 @@ contains
   end subroutine sitesym_replace_d_matrix_band
 
   !================================================!
+  subroutine sitesym_validate_data(sitesym, representation_size, num_kpts, num_wann, error, comm)
+    !================================================!
+    !! Validate the allocation, dimensions, and index maps read from a .dmn
+    !! file before any symmetry routine dereferences them.
+
+    use w90_wannier90_types, only: sitesym_type
+
+    implicit none
+
+    type(sitesym_type), intent(in) :: sitesym
+    type(w90_error_type), allocatable, intent(out) :: error
+    type(w90_comm_type), intent(in) :: comm
+    integer, intent(in) :: representation_size, num_kpts, num_wann
+
+    integer :: ik, ir
+
+    if (.not. allocated(sitesym%ik2ir) .or. .not. allocated(sitesym%ir2ik) .or. &
+        .not. allocated(sitesym%kptsym) .or. .not. allocated(sitesym%d_matrix_band) .or. &
+        .not. allocated(sitesym%d_matrix_wann)) then
+      call set_error_fatal(error, 'site-symmetry representation is not fully allocated', comm)
+      return
+    end if
+    if (representation_size < num_wann .or. num_kpts < 1 .or. num_wann < 1 .or. &
+        sitesym%nkptirr < 1 .or. sitesym%nsymmetry < 1) then
+      call set_error_fatal(error, 'site-symmetry representation has invalid dimensions', comm)
+      return
+    end if
+    if (size(sitesym%ik2ir) /= num_kpts .or. size(sitesym%ir2ik) /= sitesym%nkptirr .or. &
+        size(sitesym%kptsym, 1) /= sitesym%nsymmetry .or. &
+        size(sitesym%kptsym, 2) /= sitesym%nkptirr) then
+      call set_error_fatal(error, 'site-symmetry k-point map dimensions are inconsistent', comm)
+      return
+    end if
+    if (size(sitesym%d_matrix_band, 1) /= representation_size .or. &
+        size(sitesym%d_matrix_band, 2) /= representation_size .or. &
+        size(sitesym%d_matrix_band, 3) /= sitesym%nsymmetry .or. &
+        size(sitesym%d_matrix_band, 4) /= sitesym%nkptirr) then
+      call set_error_fatal(error, 'site-symmetry band representation dimensions are inconsistent', comm)
+      return
+    end if
+    if (size(sitesym%d_matrix_wann, 1) /= num_wann .or. &
+        size(sitesym%d_matrix_wann, 2) /= num_wann .or. &
+        size(sitesym%d_matrix_wann, 3) /= sitesym%nsymmetry .or. &
+        size(sitesym%d_matrix_wann, 4) /= sitesym%nkptirr) then
+      call set_error_fatal(error, 'site-symmetry Wannier representation dimensions are inconsistent', comm)
+      return
+    end if
+    if (any(sitesym%ik2ir < 1) .or. any(sitesym%ik2ir > sitesym%nkptirr) .or. &
+        any(sitesym%ir2ik < 1) .or. any(sitesym%ir2ik > num_kpts) .or. &
+        any(sitesym%kptsym < 1) .or. any(sitesym%kptsym > num_kpts)) then
+      call set_error_fatal(error, 'site-symmetry k-point map contains an out-of-range index', comm)
+      return
+    end if
+    do ir = 1, sitesym%nkptirr
+      if (sitesym%kptsym(1, ir) /= sitesym%ir2ik(ir)) then
+        call set_error_fatal(error, 'first site-symmetry operation is not the identity', comm)
+        return
+      end if
+      if (sitesym%ik2ir(sitesym%ir2ik(ir)) /= ir) then
+        call set_error_fatal(error, 'site-symmetry irreducible k-point maps are not inverse', comm)
+        return
+      end if
+      if (any(sitesym%ik2ir(sitesym%kptsym(:, ir)) /= ir)) then
+        call set_error_fatal(error, 'site-symmetry operation leaves its k-point star', comm)
+        return
+      end if
+      do ik = 1, num_kpts
+        if (sitesym%ik2ir(ik) == ir .and. .not. any(sitesym%kptsym(:, ir) == ik)) then
+          call set_error_fatal(error, 'site-symmetry operations do not cover a complete k-point star', comm)
+          return
+        end if
+      end do
+    end do
+
+  end subroutine sitesym_validate_data
+
+  !================================================!
   subroutine sitesym_symmetrize_u_matrix(sitesym, umat, num_bands, ndim, num_kpts, num_wann, &
                                          stdout, error, comm, lwindow_in)
     !================================================!
@@ -167,6 +245,19 @@ contains
     integer :: ik, ir, isym, irk, n
     logical :: ldone(num_kpts)
     complex(kind=dp) :: cmat(ndim, num_wann)
+
+    call sitesym_validate_data(sitesym, ndim, num_kpts, num_wann, error, comm)
+    if (allocated(error)) return
+    if (size(umat, 1) /= ndim .or. size(umat, 2) /= num_wann .or. size(umat, 3) /= num_kpts) then
+      call set_error_fatal(error, 'invalid U-matrix dimensions in sitesym_symmetrize_u_matrix', comm)
+      return
+    end if
+    if (present(lwindow_in)) then
+      if (size(lwindow_in, 1) /= num_bands .or. size(lwindow_in, 2) /= num_kpts) then
+        call set_error_fatal(error, 'invalid window dimensions in sitesym_symmetrize_u_matrix', comm)
+        return
+      end if
+    end if
 
     if (present(lwindow_in) .and. (ndim .ne. num_bands)) then
       call set_error_fatal(error, 'ndim!=num_bands', comm)
@@ -809,6 +900,27 @@ contains
   end subroutine sitesym_dis_extract_symmetry
 
   !================================================!
+  subroutine sitesym_clear_data(sitesym)
+    !================================================!
+
+    use w90_wannier90_types, only: sitesym_type
+
+    implicit none
+
+    type(sitesym_type), intent(inout) :: sitesym
+
+    if (allocated(sitesym%ik2ir)) deallocate (sitesym%ik2ir)
+    if (allocated(sitesym%ir2ik)) deallocate (sitesym%ir2ik)
+    if (allocated(sitesym%kptsym)) deallocate (sitesym%kptsym)
+    if (allocated(sitesym%d_matrix_band)) deallocate (sitesym%d_matrix_band)
+    if (allocated(sitesym%d_matrix_wann)) deallocate (sitesym%d_matrix_wann)
+
+    sitesym%nkptirr = 9999
+    sitesym%nsymmetry = 9999
+
+  end subroutine sitesym_clear_data
+
+  !================================================!
   subroutine sitesym_read(sitesym, num_bands, num_kpts, num_wann, seedname, error, comm)
     !================================================!
 
@@ -827,54 +939,67 @@ contains
     character(len=*), intent(in)  :: seedname
 
     ! local variables
-    integer :: iu, ibnum, iknum, ierr
+    integer :: iu, ibnum, iknum, ierr, ios
+    character(len=256) :: header
+    character(len=:), allocatable :: dmn_path
 
-    open (newunit=iu, file=trim(seedname)//".dmn", form='formatted', status='old', action='read')
-    read (iu, *)
-    read (iu, *) ibnum, sitesym%nsymmetry, sitesym%nkptirr, iknum
+    dmn_path = trim(seedname)//'.dmn'
+    call sitesym_clear_data(sitesym)
+
+    open (newunit=iu, file=dmn_path, form='formatted', status='old', action='read', iostat=ios)
+    if (ios /= 0) then
+      call set_error_file(error, 'Error opening site-symmetry file '//dmn_path, comm)
+      return
+    end if
+    read (iu, '(A)', iostat=ios) header
+    if (ios == 0) read (iu, *, iostat=ios) ibnum, sitesym%nsymmetry, sitesym%nkptirr, iknum
+    if (ios /= 0) then
+      close (iu)
+      call set_error_file(error, 'Error reading header from site-symmetry file '//dmn_path, comm)
+      return
+    end if
     if (ibnum .ne. num_bands) then
+      close (iu)
       call set_error_file(error, "Error: Number of bands is not correct (sitesym_read)", comm)
       return
     end if
     if (iknum .ne. num_kpts) then
+      close (iu)
       call set_error_file(error, "Error: Number of k-points is not correct (sitesym_read)", comm)
       return
     end if
-
-    allocate (sitesym%ik2ir(num_kpts), stat=ierr)
-    if (ierr /= 0) then
-      call set_error_alloc(error, 'Error in allocating sitesym%ik2ir in sitesym_read', comm)
-      return
-    end if
-    allocate (sitesym%ir2ik(sitesym%nkptirr), stat=ierr)
-    if (ierr /= 0) then
-      call set_error_alloc(error, 'Error in allocating sitesym%ir2ik in sitesym_read', comm)
-      return
-    end if
-    allocate (sitesym%kptsym(sitesym%nsymmetry, sitesym%nkptirr), stat=ierr)
-    if (ierr /= 0) then
-      call set_error_alloc(error, 'Error in allocating sitesym%kptsym in sitesym_read', comm)
-      return
-    end if
-    allocate (sitesym%d_matrix_band(num_bands, num_bands, sitesym%nsymmetry, sitesym%nkptirr), stat=ierr)
-    if (ierr /= 0) then
-      call set_error_alloc(error, 'Error in allocating sitesym%d_matrix_band in sitesym_read', comm)
-      return
-    end if
-    allocate (sitesym%d_matrix_wann(num_wann, num_wann, sitesym%nsymmetry, sitesym%nkptirr), stat=ierr)
-    if (ierr /= 0) then
-      call set_error_alloc(error, 'Error in allocating sitesym%d_matrix_wann in sitesym_read', comm)
+    if (sitesym%nsymmetry < 1 .or. sitesym%nkptirr < 1) then
+      close (iu)
+      call set_error_file(error, 'Invalid dimensions in site-symmetry file '//dmn_path, comm)
       return
     end if
 
-    read (iu, *) sitesym%ik2ir
-    read (iu, *) sitesym%ir2ik
-    read (iu, *) sitesym%kptsym
-    read (iu, *) sitesym%d_matrix_wann
-    read (iu, *) sitesym%d_matrix_band
+    allocate (sitesym%ik2ir(num_kpts), sitesym%ir2ik(sitesym%nkptirr), &
+              sitesym%kptsym(sitesym%nsymmetry, sitesym%nkptirr), &
+              sitesym%d_matrix_band(num_bands, num_bands, sitesym%nsymmetry, sitesym%nkptirr), &
+              sitesym%d_matrix_wann(num_wann, num_wann, sitesym%nsymmetry, sitesym%nkptirr), stat=ierr)
+    if (ierr /= 0) then
+      close (iu)
+      call sitesym_clear_data(sitesym)
+      call set_error_alloc(error, 'Error allocating site-symmetry data in sitesym_read', comm)
+      return
+    end if
+
+    read (iu, *, iostat=ios) sitesym%ik2ir
+    if (ios == 0) read (iu, *, iostat=ios) sitesym%ir2ik
+    if (ios == 0) read (iu, *, iostat=ios) sitesym%kptsym
+    if (ios == 0) read (iu, *, iostat=ios) sitesym%d_matrix_wann
+    if (ios == 0) read (iu, *, iostat=ios) sitesym%d_matrix_band
     close (iu)
+    if (ios /= 0) then
+      call sitesym_clear_data(sitesym)
+      call set_error_file(error, 'Error reading site-symmetry data from '//dmn_path, comm)
+      return
+    end if
 
-    return
+    call sitesym_validate_data(sitesym, num_bands, num_kpts, num_wann, error, comm)
+    if (allocated(error)) call sitesym_clear_data(sitesym)
+
   end subroutine sitesym_read
 
   !================================================!

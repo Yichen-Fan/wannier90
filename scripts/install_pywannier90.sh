@@ -134,6 +134,7 @@ cmake \
     -DWANNIER90_WITH_C=ON \
     -DWANNIER90_SHARED_LIBS=ON \
     -DWANNIER90_INSTALL=ON \
+    -DWANNIER90_TEST=OFF \
     -DWANNIER90_MPI=OFF
 
 cmake --build "$build_dir" --parallel "$jobs"
@@ -199,6 +200,7 @@ env \
 from pywannier90_v4 import Wannier90V4Library
 
 with Wannier90V4Library() as library:
+    library.require_site_symmetry_support()
     print(f"Loaded Wannier90 v4 C library: {library.path}")
 PY
 

@@ -141,6 +141,7 @@ cmake \
     -DWANNIER90_WITH_C=ON \
     -DWANNIER90_SHARED_LIBS=ON \
     -DWANNIER90_INSTALL=ON \
+    -DWANNIER90_TEST=OFF \
     -DWANNIER90_MPI=ON
 
 cmake --build "$build_dir" --parallel "$jobs"
@@ -225,6 +226,7 @@ if $install_python || $run_tests; then
 from pywannier90_v4 import Wannier90V4Library
 
 with Wannier90V4Library() as library:
+    library.require_site_symmetry_support()
     if not library.is_mpi:
         raise SystemExit(f"Expected an MPI Wannier90 library, got {library.path}")
     print(

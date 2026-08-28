@@ -88,7 +88,7 @@ module w90_library
 
   ! datatype encapsulating types used by wannier90
   type lib_common_type
-    character(len=50) :: seedname ! size=50 is a convention here
+    character(len=:), allocatable :: seedname
     !! base name for reading/writing of files
 
     ! matrices
@@ -537,17 +537,37 @@ contains
     !! Lazily load .dmn data for every library entry point that consumes it.
 
     use w90_error_base, only: w90_error_type
-    use w90_sitesym, only: sitesym_read
+    use w90_sitesym, only: sitesym_read, sitesym_validate_data
 
     implicit none
 
     type(lib_common_type), intent(inout) :: common_data
     type(w90_error_type), allocatable, intent(out) :: error
 
-    if (common_data%lsitesymmetry .and. .not. allocated(common_data%sitesym%ik2ir)) then
+    integer :: representation_size
+    logical :: have_all
+
+    if (.not. common_data%lsitesymmetry) return
+
+    have_all = allocated(common_data%sitesym%ik2ir) .and. &
+               allocated(common_data%sitesym%ir2ik) .and. &
+               allocated(common_data%sitesym%kptsym) .and. &
+               allocated(common_data%sitesym%d_matrix_band) .and. &
+               allocated(common_data%sitesym%d_matrix_wann)
+
+    if (.not. have_all) then
+      ! A partially initialized representation is never safe to reuse.  The
+      ! reader clears any surviving components before rebuilding the complete
+      ! state from the .dmn file.
       call sitesym_read(common_data%sitesym, common_data%num_bands, common_data%num_kpts, &
                         common_data%num_wann, common_data%seedname, error, common_data%comm)
+      if (allocated(error)) return
     end if
+
+    representation_size = common_data%num_bands
+    if (common_data%have_disentangled) representation_size = common_data%num_wann
+    call sitesym_validate_data(common_data%sitesym, representation_size, common_data%num_kpts, &
+                               common_data%num_wann, error, common_data%comm)
 
   end subroutine w90_ensure_sitesym_data
 
