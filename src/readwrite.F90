@@ -5014,11 +5014,31 @@ contains
   subroutine expand_settings(settings) ! this is a compromise to avoid a fixed size
     type(settings_data), allocatable :: nentries(:)
     type(settings_type), intent(inout) :: settings
-    integer :: n, m ! old, new sizes
+    integer :: i, n, m ! old, new sizes
     integer, parameter :: incsize = 20 ! default increment when settings array grows
     n = settings%num_entries_max
     m = n + incsize
-    allocate (nentries(m)); nentries(1:n) = settings%entries(1:n); call move_alloc(nentries, settings%entries) !f2003, note that "new" space not initialised
+    allocate (nentries(m))
+
+    ! Move the allocatable components individually instead of relying on
+    ! intrinsic assignment of an array of derived types.  In particular,
+    ! some gfortran versions corrupt deferred-length character arrays (such
+    ! as the library-mode symbols setting) when that array assignment grows
+    ! the settings store.
+    do i = 1, n
+      call move_alloc(settings%entries(i)%keyword, nentries(i)%keyword)
+      call move_alloc(settings%entries(i)%txtdata, nentries(i)%txtdata)
+      call move_alloc(settings%entries(i)%c2d, nentries(i)%c2d)
+      call move_alloc(settings%entries(i)%i1d, nentries(i)%i1d)
+      call move_alloc(settings%entries(i)%i2d, nentries(i)%i2d)
+      call move_alloc(settings%entries(i)%idata, nentries(i)%idata)
+      call move_alloc(settings%entries(i)%l1d, nentries(i)%l1d)
+      call move_alloc(settings%entries(i)%ldata, nentries(i)%ldata)
+      call move_alloc(settings%entries(i)%r1d, nentries(i)%r1d)
+      call move_alloc(settings%entries(i)%r2d, nentries(i)%r2d)
+      call move_alloc(settings%entries(i)%rdata, nentries(i)%rdata)
+    end do
+    call move_alloc(nentries, settings%entries)
     settings%num_entries_max = m
   end subroutine expand_settings
 

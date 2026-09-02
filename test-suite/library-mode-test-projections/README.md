@@ -5,3 +5,7 @@ This test exercises the projections parsing path in library mode through `w90_se
 It verifies that when two projection entries are provided, both are parsed correctly.
 A previous off-by-one bug in `w90_readwrite_get_projections` skipped the last entry and caused
 `w90_input_setopt` to return an error.
+
+It also fills the initial library settings store to its capacity and verifies that growing
+the store preserves two repeated one-letter atom symbols. This guards the `H:s` shorthand,
+which must create one projection on each H atom after settings reallocation.
