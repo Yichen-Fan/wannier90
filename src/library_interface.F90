@@ -88,7 +88,7 @@ module w90_library
 
   ! datatype encapsulating types used by wannier90
   type lib_common_type
-    character(len=:), allocatable :: seedname
+    character(len=50) :: seedname ! size=50 is required by downstream interfaces
     !! base name for reading/writing of files
 
     ! matrices
