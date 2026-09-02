@@ -285,6 +285,14 @@ contains
 
       call w90_readwrite_read_gamma_only(settings, gamma_only, num_kpts, error, comm)
       if (allocated(error)) return
+      if (gamma_only .and. trim(wann_control%wannier_optimizer) == 'cg_lbfgs') then
+        call set_error_input(error, 'Error: cg_lbfgs does not yet support gamma_only=true', comm)
+        return
+      end if
+      if (lsitesymmetry .and. trim(wann_control%wannier_optimizer) == 'cg_lbfgs') then
+        call set_error_input(error, 'Error: cg_lbfgs does not yet support site_symmetry=true', comm)
+        return
+      end if
 
       call w90_wannier90_readwrite_read_post_proc(settings, cp_pp, calc_only_A, &
                                                   w90_calculation%postproc_setup, error, comm)
@@ -664,6 +672,65 @@ contains
       return
     end if
 
+    call w90_readwrite_get_keyword(settings, 'wannier_optimizer', found, error, comm, &
+                                   c_value=wann_control%wannier_optimizer)
+    if (allocated(error)) return
+    if (trim(wann_control%wannier_optimizer) /= 'cg' .and. &
+        trim(wann_control%wannier_optimizer) /= 'cg_lbfgs') then
+      call set_error_input(error, "Error: wannier_optimizer must be 'cg' or 'cg_lbfgs'", comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'lbfgs_history_size', found, error, comm, &
+                                   i_value=wann_control%lbfgs_history_size)
+    if (allocated(error)) return
+    if (wann_control%lbfgs_history_size < 1) then
+      call set_error_input(error, 'Error: lbfgs_history_size must be positive', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'lbfgs_curvature_tol', found, error, comm, &
+                                   r_value=wann_control%lbfgs_curvature_tolerance)
+    if (allocated(error)) return
+    if (wann_control%lbfgs_curvature_tolerance <= 0.0_dp .or. &
+        wann_control%lbfgs_curvature_tolerance >= 1.0_dp) then
+      call set_error_input(error, &
+                           'Error: lbfgs_curvature_tol must lie strictly between zero and one', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'lbfgs_wolfe_c2', found, error, comm, &
+                                   r_value=wann_control%lbfgs_wolfe_c2)
+    if (allocated(error)) return
+    if (wann_control%lbfgs_wolfe_c2 <= 0.0_dp .or. wann_control%lbfgs_wolfe_c2 >= 1.0_dp) then
+      call set_error_input(error, 'Error: lbfgs_wolfe_c2 must lie strictly between zero and one', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'lbfgs_plateau_window', found, error, comm, &
+                                   i_value=wann_control%lbfgs_plateau_window)
+    if (allocated(error)) return
+    if (wann_control%lbfgs_plateau_window < 1) then
+      call set_error_input(error, 'Error: lbfgs_plateau_window must be positive', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'lbfgs_plateau_rel_tol', found, error, comm, &
+                                   r_value=wann_control%lbfgs_plateau_relative_tolerance)
+    if (allocated(error)) return
+    if (wann_control%lbfgs_plateau_relative_tolerance < 0.0_dp) then
+      call set_error_input(error, 'Error: lbfgs_plateau_rel_tol must be non-negative', comm)
+      return
+    end if
+
+    call w90_readwrite_get_keyword(settings, 'lbfgs_min_cg_iterations', found, error, comm, &
+                                   i_value=wann_control%lbfgs_min_cg_iterations)
+    if (allocated(error)) return
+    if (wann_control%lbfgs_min_cg_iterations < 0) then
+      call set_error_input(error, 'Error: lbfgs_min_cg_iterations must be non-negative', comm)
+      return
+    end if
+
     call w90_readwrite_get_keyword(settings, 'conv_tol', found, error, comm, &
                                    r_value=wann_control%conv_tol)
     if (allocated(error)) return
@@ -917,6 +984,34 @@ contains
     if (found) then
       if (wann_control%constrain%lambda < 0.0_dp) then
         call set_error_input(error, 'Error: slwf_lambda  must be positive.', comm)
+        return
+      end if
+    end if
+
+    if (trim(wann_control%wannier_optimizer) == 'cg_lbfgs') then
+      if (.not. wann_control%space_energy%enabled) then
+        call set_error_input(error, &
+                             'Error: cg_lbfgs currently requires a nonzero sp_en_mix', comm)
+        return
+      else if (wann_control%constrain%selective_loc) then
+        call set_error_input(error, &
+                             'Error: cg_lbfgs does not yet support selective localization', comm)
+        return
+      else if (wann_control%use_ss_functional) then
+        call set_error_input(error, &
+                             'Error: cg_lbfgs requires the Marzari-Vanderbilt functional', comm)
+        return
+      else if (wann_control%precond) then
+        call set_error_input(error, &
+                             'Error: cg_lbfgs does not yet support precond=true', comm)
+        return
+      else if (wann_control%lfixstep) then
+        call set_error_input(error, &
+                             'Error: cg_lbfgs requires a line search and cannot use fixed_step', comm)
+        return
+      else if (wann_control%space_energy%armijo_constant >= wann_control%lbfgs_wolfe_c2) then
+        call set_error_input(error, &
+                             'Error: cg_lbfgs requires sp_en_armijo_c1 < lbfgs_wolfe_c2', comm)
         return
       end if
     end if
@@ -2181,6 +2276,22 @@ contains
         wann_control%num_iter, '|'
       write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  Number of CG steps before reset           :', &
         wann_control%num_cg_steps, '|'
+      if (trim(wann_control%wannier_optimizer) == 'cg_lbfgs') then
+        write (stdout, '(1x,a46,10x,a8,13x,a1)') '|  Wannierisation optimizer                  :', &
+          trim(wann_control%wannier_optimizer), '|'
+        write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  L-BFGS history size                       :', &
+          wann_control%lbfgs_history_size, '|'
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  L-BFGS curvature tolerance                :', &
+          wann_control%lbfgs_curvature_tolerance, '|'
+        write (stdout, '(1x,a46,10x,F8.3,13x,a1)') '|  L-BFGS strong-Wolfe curvature constant    :', &
+          wann_control%lbfgs_wolfe_c2, '|'
+        write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  L-BFGS plateau window                     :', &
+          wann_control%lbfgs_plateau_window, '|'
+        write (stdout, '(1x,a46,8x,ES10.3,13x,a1)') '|  L-BFGS plateau relative tolerance         :', &
+          wann_control%lbfgs_plateau_relative_tolerance, '|'
+        write (stdout, '(1x,a46,10x,I8,13x,a1)') '|  Minimum CG iterations before plateau test :', &
+          wann_control%lbfgs_min_cg_iterations, '|'
+      end if
       if (wann_control%lfixstep) then
         write (stdout, '(1x,a46,10x,f8.3,13x,a1)') '|  Fixed step length for minimisation        :', &
           wann_control%fixed_step, '|'

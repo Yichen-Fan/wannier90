@@ -36,6 +36,7 @@ target_sources(Wannier90_lib PRIVATE
 		kmesh.F90
 		library_extra.F90
 		library_interface.F90
+		lbfgs.F90
 		overlap.F90
 		plot.F90
 		readwrite.F90

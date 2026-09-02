@@ -1,4 +1,34 @@
 ## List tests
+add_executable(w90_lbfgs_unit lbfgs_unit.F90)
+target_link_libraries(w90_lbfgs_unit PRIVATE Wannier90_lib)
+
+if (WANNIER90_MPI)
+	target_compile_definitions(w90_lbfgs_unit PRIVATE MPI)
+	if (WANNIER90_MPIH)
+		target_compile_definitions(w90_lbfgs_unit PRIVATE MPIH)
+	endif ()
+	add_test(NAME unit_lbfgs
+			COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+			${MPIEXEC_PREFLAGS} $<TARGET_FILE:w90_lbfgs_unit> ${MPIEXEC_POSTFLAGS}
+	)
+	set_tests_properties(unit_lbfgs PROPERTIES
+			LABELS unit
+			PROCESSORS 2
+	)
+else ()
+	add_test(NAME unit_lbfgs COMMAND $<TARGET_FILE:w90_lbfgs_unit>)
+	set_tests_properties(unit_lbfgs PROPERTIES LABELS unit)
+endif ()
+
+set(_lbfgs_test_environment
+		"LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:Wannier90_lib>"
+		"DYLD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:Wannier90_lib>"
+		"PATH=path_list_prepend:$<TARGET_FILE_DIR:Wannier90_lib>"
+)
+set_tests_properties(unit_lbfgs PROPERTIES
+		ENVIRONMENT_MODIFICATION "${_lbfgs_test_environment}"
+)
+
 set(test_names
                 checkpoint0_write
                 checkpoint1_read

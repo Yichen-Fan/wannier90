@@ -784,6 +784,31 @@ contains
       call set_error_fatal(error, 'Error: u_matrix not set for w90_wannierise()', common_data%comm)
     end if
 
+    if (.not. allocated(error) .and. &
+        trim(common_data%wann_control%wannier_optimizer) == 'cg_lbfgs') then
+      if (common_data%gamma_only) then
+        call set_error_fatal(error, 'Error: cg_lbfgs does not yet support gamma_only', &
+                             common_data%comm)
+      else if (common_data%lsitesymmetry) then
+        call set_error_fatal(error, 'Error: cg_lbfgs does not yet support site symmetry', &
+                             common_data%comm)
+      else if (.not. common_data%wann_control%space_energy%enabled) then
+        call set_error_fatal(error, 'Error: cg_lbfgs currently requires space-energy localization', &
+                             common_data%comm)
+      else if (common_data%wann_control%precond) then
+        call set_error_fatal(error, 'Error: cg_lbfgs does not yet support preconditioning', &
+                             common_data%comm)
+      else if (common_data%wann_control%lfixstep) then
+        call set_error_fatal(error, 'Error: cg_lbfgs requires a line search and cannot use fixed_step', &
+                             common_data%comm)
+      else if (common_data%wann_control%space_energy%armijo_constant >= &
+               common_data%wann_control%lbfgs_wolfe_c2) then
+        call set_error_fatal(error, &
+                             'Error: cg_lbfgs requires sp_en_armijo_c1 < lbfgs_wolfe_c2', &
+                             common_data%comm)
+      end if
+    end if
+
     if (.not. allocated(error) .and. common_data%wann_control%space_energy%enabled) then
       if (common_data%gamma_only) then
         call set_error_fatal(error, 'Error: space-energy localization does not yet support gamma_only', &

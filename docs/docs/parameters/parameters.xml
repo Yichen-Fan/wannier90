@@ -547,6 +547,76 @@
     <required>False</required>
   </parameter>
   <parameter tool="w90">
+    <name>wannier_optimizer</name>
+    <type>S</type>
+    <description>Wannierisation optimizer: conjugate gradients or guarded CG--L-BFGS with plateau and line-search-failure switching</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>cg</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>lbfgs_history_size</name>
+    <type>I</type>
+    <description>Maximum number of secant pairs retained by the shadow or active L-BFGS history</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>5</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>lbfgs_curvature_tol</name>
+    <type>R</type>
+    <description>Relative positive-curvature floor in (0,1) used to damp L-BFGS secant pairs</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1e-8</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>lbfgs_wolfe_c2</name>
+    <type>R</type>
+    <description>Strong-Wolfe curvature constant used to validate accepted CG and L-BFGS secant pairs</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>0.9</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>lbfgs_plateau_window</name>
+    <type>I</type>
+    <description>Number of accepted CG steps used to detect an objective plateau</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>10</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>lbfgs_plateau_rel_tol</name>
+    <type>R</type>
+    <description>Relative objective decrease below which CG--L-BFGS switches optimizer</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>1e-8</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
+    <name>lbfgs_min_cg_iterations</name>
+    <type>I</type>
+    <description>Minimum accepted CG steps before a plateau-triggered L-BFGS switch</description>
+    <groups>
+      <group>wannierise</group>
+    </groups>
+    <default>20</default>
+    <required>False</required>
+  </parameter>
+  <parameter tool="w90">
     <name>conv_window</name>
     <type>I</type>
     <description>The number of iterations over which convergence of $\\Omega$ is assessed</description>

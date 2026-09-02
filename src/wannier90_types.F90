@@ -229,6 +229,20 @@ module w90_wannier90_types
     !! Number of wannierisation iterations
     integer :: num_cg_steps = 5
     !! Number of Conjugate Gradient steps
+    character(len=20) :: wannier_optimizer = 'cg'
+    !! Wannierisation optimizer: 'cg' or the guarded CG-to-L-BFGS hybrid.
+    integer :: lbfgs_history_size = 5
+    !! Maximum number of secant pairs retained by L-BFGS.
+    real(kind=dp) :: lbfgs_curvature_tolerance = 1.0e-8_dp
+    !! Relative positive-curvature floor in (0, 1) used to damp L-BFGS secant pairs.
+    real(kind=dp) :: lbfgs_wolfe_c2 = 0.9_dp
+    !! Strong-Wolfe curvature constant used to validate accepted secant steps.
+    integer :: lbfgs_plateau_window = 10
+    !! Number of accepted CG steps used to detect an objective plateau.
+    real(kind=dp) :: lbfgs_plateau_relative_tolerance = 1.0e-8_dp
+    !! Relative objective decrease below which the hybrid switches to L-BFGS.
+    integer :: lbfgs_min_cg_iterations = 20
+    !! Minimum number of accepted CG steps before a plateau-triggered L-BFGS switch.
     real(kind=dp) :: conv_tol = 1.0e-10_dp
     integer :: conv_window
     type(guiding_centres_type) :: guiding_centres

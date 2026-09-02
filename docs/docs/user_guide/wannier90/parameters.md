@@ -778,6 +778,90 @@ descents.
 
 The default value is 5
 
+### `character(len=20) :: wannier_optimizer`
+
+Select the optimizer used for wannierisation. `cg` retains the historical
+conjugate-gradient algorithm. `cg_lbfgs` starts with the same CG algorithm
+and switches once to limited-memory BFGS when the objective reaches a
+relative plateau while the gradient remains unconverged. An objective
+convergence window with an unconverged gradient also triggers the switch.
+While CG is active, accepted steps that pass a retrospective strong-Wolfe
+test populate a shadow L-BFGS history. If a CG Armijo line search stalls,
+that warm history supplies a third switch trigger and a replacement direction.
+If no usable warm direction is available, the hybrid retries with steepest
+descent and starts rebuilding its history from that accepted step.
+
+The initial `cg_lbfgs` implementation is available for space-energy
+localization in the general k-point branch with the Marzari--Vanderbilt
+functional. It does not support `gamma_only`, `site_symmetry`, selective
+localization, `use_ss_functional`, `precond`, or `fixed_step`. Active L-BFGS
+history is cleared whenever its local model is no longer trustworthy,
+including a failed retrospective Wolfe or descent check, guiding-centre
+rephasing, convergence noise, and the steepest-descent retry after a failed
+L-BFGS direction. A successful warm L-BFGS recovery from a failed CG line
+search retains the history. During the CG phase, a step that fails the
+retrospective Wolfe test is omitted while older trusted shadow pairs remain
+available.
+
+The default value is `cg`.
+
+### `integer :: lbfgs_history_size`
+
+Maximum number of accepted secant pairs retained by the shadow or active
+L-BFGS history. Larger values provide a richer local curvature model at the
+cost of two distributed complex tangent arrays per history entry.
+
+The default value is 5. This is smaller than the molecular implementation's
+default because W90 retains a separate dense complex tangent at every local
+k-point.
+
+### `real(kind=dp) :: lbfgs_curvature_tol`
+
+Relative positive-curvature floor for L-BFGS secant pairs. If
+$s^T y$ is smaller than this value times $\lVert s\rVert\lVert y\rVert$,
+the gradient difference is damped along the step before it is stored.
+Numerically unusable pairs are skipped.
+
+The value must lie strictly between zero and one. The default value is
+1.0E-8.
+
+### `real(kind=dp) :: lbfgs_wolfe_c2`
+
+Set the strong-Wolfe curvature constant used to decide whether an accepted
+Armijo step supplies trustworthy L-BFGS curvature. The endpoint derivative
+is checked when the gradient is evaluated at the next accepted state, so the
+check does not require an additional gradient evaluation. A step that fails
+this retrospective check remains accepted. During CG, only that shadow pair
+is omitted; during active L-BFGS, the history is reset.
+
+The value must be greater than `sp_en_armijo_c1` and strictly less than one.
+The default value is 0.9.
+
+### `integer :: lbfgs_plateau_window`
+
+Number of accepted CG steps over which the hybrid measures relative
+objective decrease. The current and reference endpoints are both included,
+so switching requires this many completed CG steps between them.
+
+The default value is 10.
+
+### `real(kind=dp) :: lbfgs_plateau_rel_tol`
+
+Switch from CG to L-BFGS when the objective decrease over
+`lbfgs_plateau_window` steps, divided by the larger of the two objective
+magnitudes and one, is no greater than this tolerance. If `sp_en_grad_tol`
+is active, the gradient must still exceed that tolerance.
+
+The default value is 1.0E-8.
+
+### `integer :: lbfgs_min_cg_iterations`
+
+Minimum number of accepted CG steps before a plateau may trigger the
+one-way switch to L-BFGS. This preserves the CG basin-selection stage used
+by the molecular implementation.
+
+The default value is 20.
+
 ### `integer :: conv_window`
 
 If `conv_window`$\:>1$, then the minimisation is said to be converged if
@@ -878,8 +962,9 @@ F(U_{\alpha})\leq F(U_0)+c_1\alpha F'(0).
 $$
 
 Every space-energy localization step must satisfy this condition, so
-the accepted objective is monotonically non-increasing. The default
-value is $10^{-4}$.
+the accepted objective is monotonically non-increasing. With `cg_lbfgs`,
+this value must also be smaller than `lbfgs_wolfe_c2`. The default value
+is $10^{-4}$.
 
 ### `real(kind=dp) :: sp_en_backtrack_factor`
 
@@ -888,10 +973,15 @@ strictly between zero and one. The default value is 0.5.
 
 ### `integer :: sp_en_max_backtracks`
 
-Set the maximum number of Armijo step reductions in one iteration. If
-no acceptable step is found, W90 restores and returns the last accepted
-localization state. An accepted step that required backtracking also
-forces the conjugate-gradient direction to restart on the next cycle.
+Set the maximum number of Armijo step reductions for one direction
+attempt. If a CG direction fails in `cg_lbfgs` mode, W90 switches and retries
+from the last accepted state with the warm shadow L-BFGS history. If that
+direction is unavailable or fails, W90 clears the history and makes one final
+steepest-descent attempt. An active L-BFGS failure follows the same final
+steepest-descent recovery. If all applicable attempts fail, W90 restores and
+returns the last accepted localization state. An accepted CG step that
+required backtracking forces the conjugate-gradient direction to restart on
+the next cycle.
 
 The default value is 24.
 

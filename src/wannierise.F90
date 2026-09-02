@@ -82,6 +82,8 @@ contains
     use w90_sitesym, only: sitesym_symmetrize_gradient
     use w90_comms, only: mpisize, mpirank, comms_allreduce, w90_comm_type
     use w90_hamiltonian, only: hamiltonian_setup
+    use w90_lbfgs, only: lbfgs_state_type, lbfgs_apply, lbfgs_history_count, &
+                         lbfgs_initialize, lbfgs_push, lbfgs_reset
     use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
 
     implicit none
@@ -135,6 +137,7 @@ contains
     type(localisation_vars_type) :: old_spread
     type(localisation_vars_type) :: wann_spread
     type(localisation_vars_type) :: trial_spread
+    type(lbfgs_state_type) :: lbfgs_state
 
     ! Data to avoid large allocation within iteration loop
     real(kind=dp), allocatable :: rnkb_loc(:, :, :)
@@ -157,6 +160,9 @@ contains
     complex(kind=dp), allocatable :: cdodq_precond(:, :, :)
     complex(kind=dp), allocatable :: cdodq_precond_loc(:, :, :)
     complex(kind=dp), allocatable :: energy_gradient(:, :, :)
+    complex(kind=dp), allocatable :: lbfgs_previous_gradient_loc(:, :, :)
+    complex(kind=dp), allocatable :: lbfgs_previous_step_loc(:, :, :)
+    complex(kind=dp), allocatable :: lbfgs_work_loc(:, :, :)
 
     !local arrays not passed into subroutines
     complex(kind=dp), allocatable  :: cwschur1(:), cwschur2(:)
@@ -174,6 +180,7 @@ contains
     real(kind=dp), allocatable  :: evals(:)
     real(kind=dp), allocatable  :: rwork(:)
     real(kind=dp), allocatable :: history(:)
+    real(kind=dp), allocatable :: lbfgs_objective_history(:)
     real(kind=dp), allocatable :: rnr0n2(:)
 
     logical :: first_pass
@@ -182,11 +189,14 @@ contains
 
     integer, allocatable :: global_k(:)
     complex(kind=dp) :: rdotk
-    integer :: armijo_backtracks, conv_count, noise_count, page_unit
+    integer :: armijo_backtracks, conv_count, lbfgs_objective_count, noise_count, page_unit
     integer :: i, n, iter, ind, ierr, iw, ncg, nkp, nkp_loc
     integer :: irguide
     integer :: irpt, loop_kpt
     integer :: nkrank
+    logical :: lbfgs_active, lbfgs_direction_usable, lbfgs_pair_accepted, lbfgs_pair_damped
+    logical :: lbfgs_direction_was_random, lbfgs_have_previous_step
+    logical :: lbfgs_plateau_reached, lbfgs_requested, lbfgs_steepest_retry
     logical :: larmijo_stalled, lconverged, lobjective_converged
     logical :: lrandom, lfirst, ltrust_capped
     logical :: lprint, ldump, lquad
@@ -194,6 +204,8 @@ contains
     real(kind=dp) :: falphamin, alphamin
     real(kind=dp) :: gcfac, gcnorm1, gcnorm0
     real(kind=dp) :: armijo_bound, direction_norm, maximum_step, save_spread, trial_step_used
+    real(kind=dp) :: lbfgs_endpoint_slope_times_step, lbfgs_previous_slope_times_step
+    real(kind=dp) :: lbfgs_products(3), lbfgs_relative_decrease
     real(kind=dp) :: space_energy_gradient_norm2, space_energy_gradient_rms
 
     ! pllel setup
@@ -203,6 +215,60 @@ contains
     num_nodes = mpisize(comm)
     my_node_id = mpirank(comm)
     if (my_node_id == 0) on_root = .true.
+
+    lbfgs_requested = trim(wann_control%wannier_optimizer) == 'cg_lbfgs'
+    lbfgs_active = .false.
+    lbfgs_direction_was_random = .false.
+    lbfgs_have_previous_step = .false.
+    lbfgs_plateau_reached = .false.
+    lbfgs_objective_count = 0
+    lbfgs_previous_slope_times_step = 0.0_dp
+    lbfgs_relative_decrease = huge(1.0_dp)
+
+    if (trim(wann_control%wannier_optimizer) /= 'cg' .and. .not. lbfgs_requested) then
+      call set_error_fatal(error, "wannier_optimizer must be 'cg' or 'cg_lbfgs'", comm)
+      return
+    end if
+    if (lbfgs_requested) then
+      if (.not. wann_control%space_energy%enabled) then
+        call set_error_fatal(error, 'cg_lbfgs currently requires space-energy localization', comm)
+        return
+      else if (lsitesymmetry) then
+        call set_error_fatal(error, 'cg_lbfgs does not yet support site symmetry', comm)
+        return
+      else if (wann_control%constrain%selective_loc) then
+        call set_error_fatal(error, 'cg_lbfgs does not yet support selective localization', comm)
+        return
+      else if (wann_control%use_ss_functional) then
+        call set_error_fatal(error, 'cg_lbfgs requires the Marzari-Vanderbilt functional', comm)
+        return
+      else if (wann_control%precond) then
+        call set_error_fatal(error, 'cg_lbfgs does not yet support preconditioning', comm)
+        return
+      else if (wann_control%lfixstep) then
+        call set_error_fatal(error, 'cg_lbfgs requires a line search and cannot use fixed_step', comm)
+        return
+      else if (wann_control%lbfgs_history_size < 1 .or. &
+               wann_control%lbfgs_plateau_window < 1 .or. &
+               wann_control%lbfgs_min_cg_iterations < 0) then
+        call set_error_fatal(error, 'Invalid integer control for cg_lbfgs', comm)
+        return
+      else if (.not. ieee_is_finite(wann_control%lbfgs_curvature_tolerance) .or. &
+               wann_control%lbfgs_curvature_tolerance <= 0.0_dp .or. &
+               wann_control%lbfgs_curvature_tolerance >= 1.0_dp .or. &
+               .not. ieee_is_finite(wann_control%lbfgs_plateau_relative_tolerance) .or. &
+               wann_control%lbfgs_plateau_relative_tolerance < 0.0_dp .or. &
+               .not. ieee_is_finite(wann_control%lbfgs_wolfe_c2) .or. &
+               wann_control%lbfgs_wolfe_c2 <= 0.0_dp .or. &
+               wann_control%lbfgs_wolfe_c2 >= 1.0_dp) then
+        call set_error_fatal(error, 'Invalid real-valued control for cg_lbfgs', comm)
+        return
+      else if (wann_control%space_energy%armijo_constant >= wann_control%lbfgs_wolfe_c2) then
+        call set_error_fatal(error, &
+                             'cg_lbfgs requires sp_en_armijo_c1 < lbfgs_wolfe_c2', comm)
+        return
+      end if
+    end if
 
     if (wann_control%space_energy%write_info .and. &
         (.not. present(occupation_projector) .or. .not. present(seedname))) then
@@ -429,6 +495,23 @@ contains
       call set_error_alloc(error, 'Error in allocating u0_loc in wann_main', comm)
       return
     end if
+    if (lbfgs_requested) then
+      allocate (lbfgs_previous_gradient_loc(num_wann, num_wann, nkrank), &
+                lbfgs_previous_step_loc(num_wann, num_wann, nkrank), &
+                lbfgs_work_loc(num_wann, num_wann, nkrank), &
+                lbfgs_objective_history(wann_control%lbfgs_plateau_window + 1), stat=ierr)
+      if (ierr /= 0) then
+        call set_error_alloc(error, 'Error allocating cg_lbfgs workspace in wann_main', comm)
+        return
+      end if
+      call lbfgs_initialize(lbfgs_state, num_wann, num_wann, nkrank, &
+                            wann_control%lbfgs_history_size, error, comm)
+      if (allocated(error)) return
+      lbfgs_previous_gradient_loc = cmplx_0
+      lbfgs_previous_step_loc = cmplx_0
+      lbfgs_work_loc = cmplx_0
+      lbfgs_objective_history = 0.0_dp
+    end if
     allocate (cz(num_wann, num_wann), stat=ierr)
     if (ierr /= 0) then
       call set_error_alloc(error, 'Error in allocating cz in wann_main', comm)
@@ -528,6 +611,10 @@ contains
                                        energy_weight, wann_spread, error, comm)
       if (allocated(error)) return
     end if
+    if (lbfgs_requested) then
+      lbfgs_objective_count = 1
+      lbfgs_objective_history(1) = wann_spread%objective
+    end if
 
     ! public variables
     if (.not. wann_control%constrain%selective_loc) then
@@ -617,6 +704,8 @@ contains
     ! main iteration loop
     do iter = 1, wann_control%num_iter
 
+      lbfgs_steepest_retry = .false.
+      lbfgs_direction_was_random = .false.
       lprint = .false.
       if ((mod(iter, wann_control%num_print_cycles) .eq. 0) .or. (iter .eq. 1) &
           .or. (iter .eq. wann_control%num_iter)) lprint = .true.
@@ -636,6 +725,18 @@ contains
         if (allocated(error)) return
 
         irguide = 1
+        if (lbfgs_requested) then
+          call lbfgs_reset(lbfgs_state)
+          lbfgs_have_previous_step = .false.
+          if (print_output%iprint > 1) then
+            write (stdout, '(3x,a)') 'L-BFGS history reset after guiding-centre rephasing.'
+          end if
+          if (.not. lbfgs_active) then
+            lbfgs_objective_count = 1
+            lbfgs_objective_history(1) = wann_spread%objective
+            lbfgs_plateau_reached = .false.
+          end if
+        end if
       end if
 
       ! calculate gradient of omega
@@ -675,24 +776,96 @@ contains
             'Mesh-normalized space-energy gradient RMS = ', space_energy_gradient_rms
         end if
 
+        if (lbfgs_requested .and. lbfgs_have_previous_step) then
+          ! Build the same curvature history while CG is active. This gives a
+          ! later plateau or failed-line-search switch a genuine warm-started
+          ! inverse Hessian rather than an empty-history steepest-descent step.
+          ! The accepted Armijo step is checked retrospectively once its
+          ! endpoint gradient is available. Both derivatives are multiplied
+          ! by alpha so the stored step alpha*P can be used directly.
+          lbfgs_endpoint_slope_times_step = &
+            -real(sum(conjg(cdodq_loc)*lbfgs_previous_step_loc), dp)
+          call comms_allreduce(lbfgs_endpoint_slope_times_step, 1, 'SUM', error, comm)
+          if (allocated(error)) return
+          lbfgs_endpoint_slope_times_step = &
+            lbfgs_endpoint_slope_times_step/(4.0_dp*kmesh_info%wbtot)
+
+          if (ieee_is_finite(lbfgs_endpoint_slope_times_step) .and. &
+              ieee_is_finite(lbfgs_previous_slope_times_step) .and. &
+              abs(lbfgs_endpoint_slope_times_step) <= &
+              wann_control%lbfgs_wolfe_c2*abs(lbfgs_previous_slope_times_step)) then
+            ! cdodq is the negative gradient, hence y = D_old - D_new.
+            ! Anti-Hermitian body coordinates use identity transport in this
+            ! first implementation, matching W90's existing CG convention.
+            lbfgs_work_loc = -cdodq_loc - lbfgs_previous_gradient_loc
+            call lbfgs_push(lbfgs_state, lbfgs_previous_step_loc, lbfgs_work_loc, &
+                            wann_control%lbfgs_curvature_tolerance, lbfgs_pair_accepted, &
+                            lbfgs_pair_damped, error, comm)
+            if (allocated(error)) return
+            if (print_output%iprint > 2) then
+              if (lbfgs_pair_accepted) then
+                write (stdout, '(3x,a,i0,a,l1)') 'L-BFGS stored secant pair ', &
+                  lbfgs_history_count(lbfgs_state), '; damped = ', lbfgs_pair_damped
+              else
+                write (stdout, '(3x,a)') 'L-BFGS skipped a numerically unusable secant pair.'
+              end if
+            end if
+          else if (lbfgs_active) then
+            call lbfgs_reset(lbfgs_state)
+            if (print_output%iprint > 1) then
+              write (stdout, '(3x,a)') &
+                'L-BFGS history reset: accepted Armijo step failed the retrospective Wolfe test.'
+            end if
+          else if (print_output%iprint > 2) then
+            write (stdout, '(3x,a)') &
+              'L-BFGS shadow history retained; latest CG step failed the retrospective Wolfe test.'
+          end if
+          lbfgs_have_previous_step = .false.
+        end if
+
         if (wann_control%space_energy%gradient_check .and. &
             (iter == 1 .or. lobjective_converged)) then
           call internal_check_space_energy_gradient(iter)
           if (allocated(error)) return
         end if
 
-        if (lobjective_converged) then
-          if (space_energy_gradient_rms <= wann_control%space_energy%gradient_tolerance) then
-            lconverged = .true.
-            if (print_output%iprint > 0) then
-              write (stdout, '(/13x,a,es10.3,a)') '<<< Gradient RMS <', &
-                wann_control%space_energy%gradient_tolerance, ' at the accepted state >>>'
-              write (stdout, '(13x,a/)') &
-                '<<< Objective and gradient convergence criteria satisfied >>>'
-            end if
-            exit
+        if (lobjective_converged .and. &
+            wann_control%space_energy%gradient_tolerance > 0.0_dp .and. &
+            space_energy_gradient_rms <= wann_control%space_energy%gradient_tolerance) then
+          lconverged = .true.
+          if (print_output%iprint > 0) then
+            write (stdout, '(/13x,a,es10.3,a)') '<<< Gradient RMS <', &
+              wann_control%space_energy%gradient_tolerance, ' at the accepted state >>>'
+            write (stdout, '(13x,a/)') &
+              '<<< Objective and gradient convergence criteria satisfied >>>'
           end if
+          exit
+        end if
 
+        if (lbfgs_requested .and. .not. lbfgs_active .and. &
+            (lbfgs_plateau_reached .or. lobjective_converged) .and. &
+            (wann_control%space_energy%gradient_tolerance <= 0.0_dp .or. &
+             space_energy_gradient_rms > wann_control%space_energy%gradient_tolerance)) then
+          lbfgs_active = .true.
+          lobjective_converged = .false.
+          lconverged = .false.
+          conv_count = 0
+          ncg = wann_control%num_cg_steps
+          gcfac = 0.0_dp
+          if (print_output%iprint > 0) then
+            if (lbfgs_plateau_reached) then
+              write (stdout, '(/3x,a,i0,a,es12.4,a)') 'CG objective plateau detected over ', &
+                wann_control%lbfgs_plateau_window, ' accepted steps (relative decrease ', &
+                lbfgs_relative_decrease, ').'
+            else
+              write (stdout, '(/3x,a)') &
+                'CG objective-convergence window passed while the gradient remained unconverged.'
+            end if
+            write (stdout, '(3x,a,i0,a,es12.4,a,i0,a/)') 'Switching once to L-BFGS at iteration ', iter, &
+              '; gradient RMS = ', space_energy_gradient_rms, '; retained secant pairs = ', &
+              lbfgs_history_count(lbfgs_state), '.'
+          end if
+        else if (lobjective_converged) then
           if (print_output%iprint > 0) then
             write (stdout, '(3x,a,es12.4,a,es12.4)') &
               'Objective window passed, but gradient RMS ', space_energy_gradient_rms, &
@@ -727,16 +900,88 @@ contains
         write (stdout, *) ' LINE --> Iteration                     :', iter
 
       ! calculate search direction (cdq)
-      if (wann_control%precond) then
-        call precond_search_direction(cdodq, cdodq_r, cdodq_precond, cdodq_precond_loc, k_to_r, &
-                                      wann_spread, num_wann, num_kpts, kpt_latt, real_lattice, &
-                                      nrpts, irvec, ndegen, optimisation, timer)
+      if (lbfgs_active) then
+        lbfgs_direction_was_random = lrandom
+        if (lrandom) then
+          ! A convergence-noise step is not connected to the preceding point
+          ! by the deterministic local model, so do not form a secant pair.
+          call lbfgs_reset(lbfgs_state)
+          lbfgs_have_previous_step = .false.
+          cdq_loc = cdodq_loc
+          if (print_output%iprint > 0) write (stdout, '(a,i3,a,i3,a)') &
+            ' [ Adding random noise to search direction. Time ', noise_count, ' / ', &
+            wann_control%conv_noise_num, ' ]'
+          call internal_random_noise(wann_control%conv_noise_amp, num_wann, nkrank, cdq_loc)
+          if (allocated(error)) return
+        else
+          ! lbfgs_apply returns H*g for the conventional gradient g=-cdodq.
+          ! The downhill search direction is therefore -H*g.
+          lbfgs_previous_gradient_loc = -cdodq_loc
+          call lbfgs_apply(lbfgs_state, lbfgs_previous_gradient_loc, lbfgs_work_loc, error, comm)
+          if (allocated(error)) return
+          cdq_loc = -lbfgs_work_loc
+        end if
+
+        lbfgs_products(1) = sum(abs(cdodq_loc)**2)
+        lbfgs_products(2) = sum(abs(cdq_loc)**2)
+        lbfgs_products(3) = real(sum(conjg(cdodq_loc)*cdq_loc), dp)
+        call comms_allreduce(lbfgs_products(1), 3, 'SUM', error, comm)
+        if (allocated(error)) return
+
+        lbfgs_direction_usable = ieee_is_finite(lbfgs_products(1)) .and. &
+                                 ieee_is_finite(lbfgs_products(2)) .and. &
+                                 ieee_is_finite(lbfgs_products(3)) .and. &
+                                 lbfgs_products(1) >= 0.0_dp .and. lbfgs_products(2) >= 0.0_dp
+        if (lbfgs_direction_usable) then
+          lbfgs_direction_usable = lbfgs_products(3) > &
+            1.0e-4_dp*sqrt(lbfgs_products(1)*lbfgs_products(2))
+        end if
+        if (.not. lbfgs_direction_usable) then
+          call lbfgs_reset(lbfgs_state)
+          lbfgs_have_previous_step = .false.
+          ! Mark that the direction actually sent to Armijo is already raw
+          ! steepest descent.  If it stalls, repeating the identical search
+          ! in the generic L-BFGS recovery block cannot improve the result.
+          lbfgs_steepest_retry = .true.
+          cdq_loc = cdodq_loc
+          lbfgs_products(2) = lbfgs_products(1)
+          lbfgs_products(3) = lbfgs_products(1)
+          if (print_output%iprint > 1) then
+            write (stdout, '(3x,a)') &
+              'L-BFGS direction failed the descent safeguard; using steepest descent.'
+          end if
+        end if
+
+        gcnorm1 = lbfgs_products(1)
+        gcnorm0 = gcnorm1
+        gcfac = 0.0_dp
+        doda0 = -lbfgs_products(3)/(4.0_dp*kmesh_info%wbtot)
+        lrandom = .false.
+      else
+        if (wann_control%precond) then
+          call precond_search_direction(cdodq, cdodq_r, cdodq_precond, cdodq_precond_loc, k_to_r, &
+                                        wann_spread, num_wann, num_kpts, kpt_latt, real_lattice, &
+                                        nrpts, irvec, ndegen, optimisation, timer)
+        end if
+        if (lbfgs_requested) then
+          ! internal_search_direction consumes and then clears lrandom, so
+          ! remember this before the call and invalidate history before the
+          ! random tangent is applied.
+          lbfgs_direction_was_random = lrandom
+          if (lrandom) then
+            call lbfgs_reset(lbfgs_state)
+            lbfgs_have_previous_step = .false.
+            if (print_output%iprint > 1) then
+              write (stdout, '(3x,a)') 'L-BFGS shadow history reset before convergence noise.'
+            end if
+          end if
+        end if
+        call internal_search_direction(cdodq_precond_loc, cdqkeep_loc, iter, lprint, lrandom, &
+                                       noise_count, ncg, gcfac, gcnorm0, gcnorm1, doda0, &
+                                       wann_control, num_wann, kmesh_info%wbtot, cdq_loc, cdodq_loc, &
+                                       stdout, timer, error, comm)
+        if (allocated(error)) return
       end if
-      call internal_search_direction(cdodq_precond_loc, cdqkeep_loc, iter, lprint, lrandom, &
-                                     noise_count, ncg, gcfac, gcnorm0, gcnorm1, doda0, &
-                                     wann_control, num_wann, kmesh_info%wbtot, cdq_loc, cdodq_loc, &
-                                     stdout, timer, error, comm)
-      if (allocated(error)) return
 
       if (lsitesymmetry) then
         ! CG combinations remain in the constrained tangent, but optional
@@ -858,7 +1103,12 @@ contains
           write (stdout, *) ' LINE --> Trust-radius maximum step     :', maximum_step
           if (ltrust_capped) write (stdout, *) ' LINE --> Step limited by trust radius'
         end if
-        write (stdout, *) ' LINE --> CG coefficient                :', gcfac
+        if (lbfgs_active) then
+          write (stdout, *) ' LINE --> L-BFGS history size           :', &
+            lbfgs_history_count(lbfgs_state)
+        else
+          write (stdout, *) ' LINE --> CG coefficient                :', gcfac
+        end if
       end if
 
       ! if taking a fixed step or if parabolic line search was successful
@@ -934,6 +1184,108 @@ contains
                          wann_control%space_energy%armijo_constant*alphamin*doda0
         end do
 
+        if (larmijo_stalled .and. lbfgs_requested .and. .not. lbfgs_active) then
+          ! A failed CG line search is a third one-way switch trigger. Use the
+          ! trusted shadow history accumulated from earlier CG steps to form a
+          ! genuinely quasi-Newton recovery direction at the accepted state.
+          call internal_restore_and_evaluate_space_energy_step(0.0_dp, wann_spread)
+          if (allocated(error)) return
+
+          lbfgs_active = .true.
+          lbfgs_have_previous_step = .false.
+          lbfgs_direction_was_random = .false.
+          lobjective_converged = .false.
+          lconverged = .false.
+          conv_count = 0
+          ncg = wann_control%num_cg_steps
+          gcfac = 0.0_dp
+
+          if (print_output%iprint > 0) then
+            write (stdout, '(3x,a,i0,a,i0,a)') &
+              'CG Armijo line search stalled at iteration ', iter, &
+              '; switching to L-BFGS with ', lbfgs_history_count(lbfgs_state), &
+              ' retained secant pairs.'
+          end if
+
+          lbfgs_direction_usable = lbfgs_history_count(lbfgs_state) > 0
+          if (lbfgs_direction_usable) then
+            lbfgs_previous_gradient_loc = -cdodq_loc
+            call lbfgs_apply(lbfgs_state, lbfgs_previous_gradient_loc, lbfgs_work_loc, error, comm)
+            if (allocated(error)) return
+            cdqkeep_loc = -lbfgs_work_loc
+
+            lbfgs_products(1) = sum(abs(cdodq_loc)**2)
+            lbfgs_products(2) = sum(abs(cdqkeep_loc)**2)
+            lbfgs_products(3) = real(sum(conjg(cdodq_loc)*cdqkeep_loc), dp)
+            call comms_allreduce(lbfgs_products(1), 3, 'SUM', error, comm)
+            if (allocated(error)) return
+            lbfgs_direction_usable = ieee_is_finite(lbfgs_products(1)) .and. &
+                                     ieee_is_finite(lbfgs_products(2)) .and. &
+                                     ieee_is_finite(lbfgs_products(3)) .and. &
+                                     lbfgs_products(1) >= 0.0_dp .and. lbfgs_products(2) >= 0.0_dp
+            if (lbfgs_direction_usable) then
+              lbfgs_direction_usable = lbfgs_products(3) > &
+                1.0e-4_dp*sqrt(lbfgs_products(1)*lbfgs_products(2))
+            end if
+          end if
+
+          if (lbfgs_direction_usable) then
+            gcnorm1 = lbfgs_products(1)
+            gcnorm0 = gcnorm1
+            doda0 = -lbfgs_products(3)/(4.0_dp*kmesh_info%wbtot)
+            call internal_space_energy_maximum_step(cdqkeep_loc, kmesh_info%wbtot, &
+                                                    wann_control%space_energy%trust_radius, &
+                                                    direction_norm, maximum_step, error, comm)
+            if (allocated(error)) return
+            call internal_retry_space_energy_armijo(min(wann_control%trial_step, maximum_step), &
+                                                    doda0, wann_spread, alphamin, &
+                                                    armijo_backtracks, larmijo_stalled)
+            if (allocated(error)) return
+            if (.not. larmijo_stalled .and. print_output%iprint > 0) then
+              write (stdout, '(3x,a,es12.4,a,i0,a)') &
+                'Warm-started L-BFGS recovered the CG line search; step = ', alphamin, &
+                ', backtracks = ', armijo_backtracks, '.'
+            end if
+          else
+            if (print_output%iprint > 0) then
+              write (stdout, '(3x,a)') &
+                'No usable warm L-BFGS direction is available; trying steepest descent.'
+            end if
+            call lbfgs_reset(lbfgs_state)
+          end if
+        end if
+
+        if (larmijo_stalled .and. lbfgs_active .and. .not. lbfgs_steepest_retry) then
+          ! A failed L-BFGS direction, including a warm recovery from CG,
+          ! gets one final retry with the raw steepest-descent tangent.
+          call internal_restore_and_evaluate_space_energy_step(0.0_dp, wann_spread)
+          if (allocated(error)) return
+          call lbfgs_reset(lbfgs_state)
+          lbfgs_have_previous_step = .false.
+          lbfgs_steepest_retry = .true.
+          lbfgs_direction_was_random = .false.
+          cdqkeep_loc = cdodq_loc
+          lbfgs_products(1) = sum(abs(cdodq_loc)**2)
+          call comms_allreduce(lbfgs_products(1), 1, 'SUM', error, comm)
+          if (allocated(error)) return
+          gcnorm1 = lbfgs_products(1)
+          gcnorm0 = gcnorm1
+          doda0 = -gcnorm1/(4.0_dp*kmesh_info%wbtot)
+          call internal_space_energy_maximum_step(cdqkeep_loc, kmesh_info%wbtot, &
+                                                  wann_control%space_energy%trust_radius, &
+                                                  direction_norm, maximum_step, error, comm)
+          if (allocated(error)) return
+          call internal_retry_space_energy_armijo(min(wann_control%trial_step, maximum_step), &
+                                                  doda0, wann_spread, alphamin, &
+                                                  armijo_backtracks, larmijo_stalled)
+          if (allocated(error)) return
+          if (.not. larmijo_stalled .and. print_output%iprint > 0) then
+            write (stdout, '(3x,a,es12.4,a,i0,a)') &
+              'Hybrid line search recovered with steepest descent; step = ', alphamin, &
+              ', backtracks = ', armijo_backtracks, '.'
+          end if
+        end if
+
         if (larmijo_stalled) then
           ! Restore the last accepted state so final output and checkpoints
           ! can never contain a rejected uphill trial.
@@ -945,15 +1297,65 @@ contains
             write (stdout, '(3x,a)') 'Returning the last monotonically accepted localization state.'
           end if
           exit
-        else if (armijo_backtracks > 0) then
-          ! The accepted Armijo fallback has no curvature guarantee.  Force
-          ! Fletcher-Reeves to restart on the next iteration.
-          ncg = wann_control%num_cg_steps
-          gcfac = 0.0_dp
-          if (print_output%iprint > 0) then
-            write (stdout, '(3x,a,i0,a,es12.4,a)') 'Armijo accepted after ', armijo_backtracks, &
-              ' backtracks; step = ', alphamin, '; CG will restart'
+        else if (armijo_backtracks > 0 .and. .not. lbfgs_steepest_retry) then
+          if (lbfgs_active) then
+            if (print_output%iprint > 0) then
+              write (stdout, '(3x,a,i0,a,es12.4,a)') 'Armijo accepted after ', armijo_backtracks, &
+                ' backtracks; step = ', alphamin, '; L-BFGS curvature check deferred'
+            end if
+          else
+            ! The accepted Armijo fallback has no curvature guarantee. Force
+            ! Fletcher-Reeves to restart on the next iteration.
+            ncg = wann_control%num_cg_steps
+            gcfac = 0.0_dp
+            if (print_output%iprint > 0) then
+              write (stdout, '(3x,a,i0,a,es12.4,a)') 'Armijo accepted after ', armijo_backtracks, &
+                ' backtracks; step = ', alphamin, '; CG will restart'
+            end if
           end if
+        end if
+      end if
+
+      if (lbfgs_requested) then
+        if (.not. lbfgs_direction_was_random .and. &
+            ieee_is_finite(alphamin) .and. alphamin > 0.0_dp .and. &
+            ieee_is_finite(doda0) .and. doda0 < 0.0_dp) then
+          lbfgs_previous_gradient_loc = -cdodq_loc
+          lbfgs_previous_step_loc = alphamin*cdqkeep_loc
+          lbfgs_previous_slope_times_step = alphamin*doda0
+          lbfgs_have_previous_step = .true.
+        else if (.not. lbfgs_direction_was_random) then
+          call lbfgs_reset(lbfgs_state)
+          lbfgs_have_previous_step = .false.
+          if (print_output%iprint > 1) then
+            write (stdout, '(3x,a)') &
+              'L-BFGS history reset after an unusable accepted step.'
+          end if
+        else
+          lbfgs_have_previous_step = .false.
+        end if
+      end if
+
+      if (lbfgs_requested .and. .not. lbfgs_active) then
+        ! Keep the initial objective plus one endpoint for every completed CG
+        ! step. This is intentionally independent of the historical conv_window.
+        if (lbfgs_objective_count < size(lbfgs_objective_history)) then
+          lbfgs_objective_count = lbfgs_objective_count + 1
+          lbfgs_objective_history(lbfgs_objective_count) = wann_spread%objective
+        else
+          lbfgs_objective_history(1:size(lbfgs_objective_history) - 1) = &
+            lbfgs_objective_history(2:size(lbfgs_objective_history))
+          lbfgs_objective_history(size(lbfgs_objective_history)) = wann_spread%objective
+        end if
+        if (iter >= wann_control%lbfgs_min_cg_iterations .and. &
+            lbfgs_objective_count == size(lbfgs_objective_history)) then
+          lbfgs_relative_decrease = &
+            (lbfgs_objective_history(1) - &
+             lbfgs_objective_history(size(lbfgs_objective_history)))/ &
+            max(abs(lbfgs_objective_history(1)), &
+                abs(lbfgs_objective_history(size(lbfgs_objective_history))), 1.0_dp)
+          lbfgs_plateau_reached = ieee_is_finite(lbfgs_relative_decrease) .and. &
+            lbfgs_relative_decrease <= wann_control%lbfgs_plateau_relative_tolerance
         end if
       end if
 
@@ -1067,7 +1469,17 @@ contains
       end if
 
       if (lconverged) then
-        if (wann_control%space_energy%enabled .and. &
+        if (lbfgs_requested .and. .not. lbfgs_active) then
+          lobjective_converged = .true.
+          lconverged = .false.
+          if (print_output%iprint > 0) then
+            write (stdout, '(3x,a,i0,a)') 'Objective change passed its ', &
+              wann_control%conv_window, '-iteration window.'
+            write (stdout, '(3x,a)') &
+              'The accepted-state gradient will be evaluated before switching to L-BFGS.'
+          end if
+          cycle
+        else if (wann_control%space_energy%enabled .and. &
             wann_control%space_energy%gradient_tolerance > 0.0_dp) then
           lobjective_converged = .true.
           lconverged = .false.
@@ -1193,6 +1605,14 @@ contains
     if (allocated(error)) return
 
     ! deallocate sub vars not passed into other subs
+    if (lbfgs_requested) then
+      deallocate (lbfgs_previous_gradient_loc, lbfgs_previous_step_loc, lbfgs_work_loc, &
+                  lbfgs_objective_history, stat=ierr)
+      if (ierr /= 0) then
+        call set_error_dealloc(error, 'Error deallocating cg_lbfgs workspace in wann_main', comm)
+        return
+      end if
+    end if
     deallocate (rwork, stat=ierr)
     if (ierr /= 0) then
       call set_error_dealloc(error, 'Error in deallocating rwork in wann_main', comm)
@@ -1717,6 +2137,51 @@ contains
       if (allocated(error)) return
 
     end subroutine internal_restore_and_evaluate_space_energy_step
+
+    !================================================!
+    subroutine internal_retry_space_energy_armijo(initial_step, slope, spread, accepted_step, &
+                                                  backtracks, stalled)
+      !================================================!
+      !! Retry Armijo backtracking from the iteration's accepted-state
+      !! snapshot for a replacement search direction in cdqkeep_loc.
+
+      implicit none
+
+      real(kind=dp), intent(in) :: initial_step, slope
+      type(localisation_vars_type), intent(inout) :: spread
+      real(kind=dp), intent(out) :: accepted_step
+      integer, intent(out) :: backtracks
+      logical, intent(out) :: stalled
+
+      real(kind=dp) :: sufficient_decrease_bound
+
+      accepted_step = initial_step
+      backtracks = 0
+      stalled = .not. ieee_is_finite(accepted_step) .or. &
+                accepted_step < wann_control%space_energy%minimum_step
+      if (stalled) return
+
+      call internal_restore_and_evaluate_space_energy_step(accepted_step, spread)
+      if (allocated(error)) return
+      sufficient_decrease_bound = old_spread%objective + &
+                                  wann_control%space_energy%armijo_constant*accepted_step*slope
+      do while (.not. (spread%objective <= sufficient_decrease_bound))
+        if (backtracks >= wann_control%space_energy%max_backtracks .or. &
+            accepted_step*wann_control%space_energy%backtrack_factor < &
+            wann_control%space_energy%minimum_step) then
+          stalled = .true.
+          exit
+        end if
+
+        accepted_step = accepted_step*wann_control%space_energy%backtrack_factor
+        backtracks = backtracks + 1
+        call internal_restore_and_evaluate_space_energy_step(accepted_step, spread)
+        if (allocated(error)) return
+        sufficient_decrease_bound = old_spread%objective + &
+                                    wann_control%space_energy%armijo_constant*accepted_step*slope
+      end do
+
+    end subroutine internal_retry_space_energy_armijo
 
     !================================================!
     subroutine internal_space_energy_maximum_step(direction, wbtot, trust_radius, &

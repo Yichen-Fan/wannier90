@@ -1,6 +1,13 @@
 Keyword,Type,Description
 num_iter,I,"Number of iterations for the minimisation of $\\Omega$"
 num_cg_steps,I,"During the minimisation of $\\Omega$ the number of Conjugate Gradient steps before resetting to Steepest Descents"
+wannier_optimizer,S,"Wannierisation optimizer: conjugate gradients or guarded CG--L-BFGS with plateau and line-search-failure switching"
+lbfgs_history_size,I,"Maximum number of secant pairs retained by the shadow or active L-BFGS history"
+lbfgs_curvature_tol,R,"Relative positive-curvature floor in (0,1) used to damp L-BFGS secant pairs"
+lbfgs_wolfe_c2,R,"Strong-Wolfe curvature constant used to validate accepted CG and L-BFGS secant pairs"
+lbfgs_plateau_window,I,"Number of accepted CG steps used to detect an objective plateau"
+lbfgs_plateau_rel_tol,R,"Relative objective decrease below which CG--L-BFGS switches optimizer"
+lbfgs_min_cg_iterations,I,"Minimum number of accepted CG steps before a plateau-triggered L-BFGS switch"
 conv_window,I,"The number of iterations over which convergence of $\\Omega$ is assessed"
 conv_tol,P,"The convergence tolerance for finding $\\Omega$ (Ang*Ang)"
 precond,L,"Use preconditioning"
